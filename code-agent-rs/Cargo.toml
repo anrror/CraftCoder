@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "core",
+    "tools",
+    "codex",
+    "eval",
+    "cli",
+    "app-server",
+    "protocol",
+    "eval-runner",
+    "code-agent-web",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"

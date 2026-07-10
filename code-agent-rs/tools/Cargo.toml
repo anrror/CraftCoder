@@ -1,0 +1,38 @@
+[package]
+name = "code-agent-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Agent tools for code-agent-rs: file operations, git integration, shell execution, LSP integration, MCP"
+license = "MIT"
+
+[features]
+default = ["lsp", "mcp"]
+lsp = []
+mcp = []
+
+[[bin]]
+name = "mock-lsp-server"
+path = "src/bin/mock_lsp_server.rs"
+test = false
+doctest = false
+
+[dependencies]
+code-agent-core = { path = "../core" }
+code-agent-protocol = { path = "../protocol" }
+git2 = "0.19"
+tokio = { version = "1", features = ["process", "time", "fs", "io-util", "io-std", "rt", "macros", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+thiserror = "2"
+which = "6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

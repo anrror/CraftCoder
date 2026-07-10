@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code-agent-rs
+          key: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path code-agent-rs/Cargo.toml
+
+      - name: Package binary
+        shell: bash
+        run: |
+          BINARY="code-agent-rs/target/${{ matrix.target }}/release/ai-coding-agent${{ matrix.suffix }}"
+          if [ ! -f "$BINARY" ]; then
+            # Try to find any release binary in the workspace
+            BINARY=$(find code-agent-rs/target/${{ matrix.target }}/release -maxdepth 1 -type f -executable 2>/dev/null | head -1)
+          fi
+          if [ -n "$BINARY" ]; then
+            ARCHIVE="ai-coding-agent-${{ matrix.target }}${{ matrix.suffix }}"
+            if [ "${{ matrix.os }}" = "windows-latest" ]; then
+              7z a "${ARCHIVE}.zip" "$BINARY"
+              echo "artifact=${ARCHIVE}.zip" >> $GITHUB_ENV
+            else
+              tar czf "${ARCHIVE}.tar.gz" -C "$(dirname "$BINARY")" "$(basename "$BINARY")"
+              echo "artifact=${ARCHIVE}.tar.gz" >> $GITHUB_ENV
+            fi
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-coding-agent-${{ matrix.target }}
+          path: ai-coding-agent-${{ matrix.target }}.*
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ai-coding-agent-*
+          merge-multiple: true
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ai-coding-agent-*
+          generate_release_notes: true
