@@ -10,7 +10,7 @@ code-agent-core = { path = "../core" }
 code-agent-eval = { path = "../eval" }
 code-agent-app-server = { path = "../app-server" }
 
-ratatui = "0.28"
+ratatui = "0.30"
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "process", "io-util"] }
