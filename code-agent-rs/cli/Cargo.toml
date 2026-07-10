@@ -24,7 +24,7 @@ toml = "0.8"
 dirs = "5"
 textwrap = "0.16"
 uuid = { version = "1", features = ["v4"] }
-similar = "2"
+similar = "3"
 
 [dev-dependencies]
 insta = "1"
