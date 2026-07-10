@@ -1,0 +1,25 @@
+[package]
+name = "code-agent-eval-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 bridge from Rust to Python code-agent-eval for SWE-bench-Live / HumanEval"
+license = "MIT"
+rust-version = "1.80"
+
+[lib]
+name = "code_agent_eval_bridge"
+crate-type = ["rlib"]
+
+# ---------------------------------------------------------------------------
+# The eval-bridge is deliberately NOT part of the code-agent-rs workspace.
+# PyO3 has specific compiler requirements (Python dev headers, link args)
+# that would break non-Python workspace members.
+# ---------------------------------------------------------------------------
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "auto-initialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]

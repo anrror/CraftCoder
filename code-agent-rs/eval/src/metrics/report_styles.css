@@ -1,0 +1,148 @@
+/* Self-contained styles for benchmark HTML reports. */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #2c3e50;
+    background: #f5f7fa;
+    max-width: 1024px;
+    margin: 0 auto;
+    padding: 24px 16px 48px;
+}
+
+/* ---------- header ---------- */
+
+.header {
+    background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+    color: #fff;
+    padding: 28px 32px;
+    border-radius: 12px;
+    margin-bottom: 24px;
+}
+
+.header h1 {
+    font-size: 1.6rem;
+    font-weight: 600;
+}
+
+/* ---------- summary cards ---------- */
+
+.summary-cards {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+}
+
+.card {
+    flex: 1;
+    min-width: 140px;
+    background: #fff;
+    border-radius: 10px;
+    padding: 20px 16px;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    border-left: 5px solid #3498db;
+}
+
+.card-value {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.card-label {
+    font-size: 0.85rem;
+    color: #7f8c8d;
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* ---------- section headings ---------- */
+
+h2 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    margin: 32px 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 2px solid #ecf0f1;
+}
+
+/* ---------- tables ---------- */
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.05);
+    margin-bottom: 24px;
+}
+
+thead {
+    background: #34495e;
+    color: #fff;
+}
+
+th, td {
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 0.9rem;
+}
+
+tbody tr:nth-child(even) {
+    background: #f8f9fa;
+}
+
+tbody tr:hover {
+    background: #eaf2f8;
+}
+
+/* ---------- status row colours ---------- */
+
+tr.pass td:first-child {
+    border-left: 4px solid #27ae60;
+}
+
+tr.fail td:first-child {
+    border-left: 4px solid #e74c3c;
+}
+
+tr.error td:first-child,
+tr.timeout td:first-child {
+    border-left: 4px solid #f39c12;
+}
+
+tr.pass td:nth-child(2) {
+    color: #27ae60;
+    font-weight: 600;
+}
+
+tr.fail td:nth-child(2) {
+    color: #e74c3c;
+    font-weight: 600;
+}
+
+tr.error td:nth-child(2),
+tr.timeout td:nth-child(2) {
+    color: #f39c12;
+    font-weight: 600;
+}
+
+/* ---------- footer ---------- */
+
+footer {
+    text-align: center;
+    color: #95a5a6;
+    font-size: 0.8rem;
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid #ecf0f1;
+}

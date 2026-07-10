@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code Agent Chat</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1e1e1e; color: #d4d4d4; height: 100vh; display: flex; flex-direction: column; }
+  #header { background: #2d2d2d; padding: 8px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #3c3c3c; }
+  #header h1 { font-size: 14px; font-weight: 600; color: #ccc; }
+  #status { font-size: 12px; color: #888; margin-left: auto; }
+  #status.connected { color: #4ec9b0; }
+  #status.error { color: #f44747; }
+  #container { display: flex; flex: 1; overflow: hidden; }
+  #sidebar { width: 240px; background: #252526; border-right: 1px solid #3c3c3c; display: flex; flex-direction: column; }
+  #sidebar h2 { font-size: 11px; text-transform: uppercase; padding: 12px 16px 8px; color: #888; letter-spacing: 0.5px; }
+  #thread-list { flex: 1; overflow-y: auto; padding: 0 8px; }
+  .thread-item { padding: 8px 12px; cursor: pointer; border-radius: 4px; font-size: 13px; margin-bottom: 2px; display: flex; align-items: center; gap: 8px; }
+  .thread-item:hover { background: #2a2d2e; }
+  .thread-item.active { background: #37373d; color: #fff; }
+  .thread-item .del { margin-left: auto; cursor: pointer; color: #888; font-size: 14px; }
+  .thread-item .del:hover { color: #f44747; }
+  #new-thread-btn { margin: 8px; padding: 8px; background: #0e639c; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  #new-thread-btn:hover { background: #1177bb; }
+  #main { flex: 1; display: flex; flex-direction: column; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; }
+  .msg { margin-bottom: 16px; }
+  .msg .role { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #888; margin-bottom: 4px; }
+  .msg .content { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  .msg.user .content { color: #9cdcfe; }
+  .msg.assistant .content { color: #ce9178; }
+  .msg.tool-call .content { color: #6a9955; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }
+  .msg.tool-result .content { color: #6a9955; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px; }
+  .msg.error .content { color: #f44747; }
+  .msg .timestamp { font-size: 10px; color: #555; margin-top: 2px; }
+  #input-area { border-top: 1px solid #3c3c3c; padding: 12px 16px; display: flex; gap: 8px; align-items: flex-end; }
+  #input-area textarea { flex: 1; background: #3c3c3c; color: #d4d4d4; border: 1px solid #555; border-radius: 4px; padding: 8px; font-size: 14px; font-family: inherit; resize: none; min-height: 40px; max-height: 120px; }
+  #input-area textarea:focus { outline: none; border-color: #0e639c; }
+  #send-btn { padding: 8px 20px; background: #0e639c; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  #send-btn:hover { background: #1177bb; }
+  #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: #555; }
+  .empty-state p { margin-top: 8px; font-size: 14px; }
+  .typing-indicator { display: inline-block; }
+  .typing-indicator::after { content: '...'; animation: dots 1.5s steps(4, end) infinite; }
+  @keyframes dots { 0%, 20% { content: ''; } 40% { content: '.'; } 60% { content: '..'; } 80%, 100% { content: '...'; } }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>Code Agent</h1>
+  <span id="status">disconnected</span>
+</div>
+<div id="container">
+  <div id="sidebar">
+    <h2>Threads</h2>
+    <button id="new-thread-btn">+ New Thread</button>
+    <div id="thread-list"></div>
+  </div>
+  <div id="main">
+    <div id="messages">
+      <div class="empty-state">
+        <div style="font-size: 48px;">💬</div>
+        <p>Select or create a thread to start chatting</p>
+      </div>
+    </div>
+    <div id="input-area">
+      <textarea id="input" placeholder="Type a message..." rows="1" disabled></textarea>
+      <button id="send-btn" disabled>Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────
+const state = {
+  threads: [],
+  activeThreadId: null,
+  streaming: false,
+  apiKey: localStorage.getItem('api_key') || '',
+};
+
+// ── DOM refs ───────────────────────────────────────────────────────────
+const statusEl = document.getElementById('status');
+const threadListEl = document.getElementById('thread-list');
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('send-btn');
+const newThreadBtn = document.getElementById('new-thread-btn');
+
+// ── API helpers ────────────────────────────────────────────────────────
+const BASE = '';
+
+async function apiFetch(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...options.headers };
+  if (state.apiKey) {
+    headers['Authorization'] = `Bearer ${state.apiKey}`;
+  }
+  const res = await fetch(`${BASE}${path}`, { ...options, headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error || `HTTP ${res.status}`);
+  }
+  return res;
+}
+
+// ── Thread management ──────────────────────────────────────────────────
+
+async function loadThreads() {
+  // We don't have a GET /threads endpoint, so we track locally
+  renderThreadList();
+}
+
+function renderThreadList() {
+  threadListEl.innerHTML = '';
+  for (const tid of state.threads) {
+    const div = document.createElement('div');
+    div.className = `thread-item${tid === state.activeThreadId ? ' active' : ''}`;
+    div.innerHTML = `<span>${tid}</span><span class="del" data-tid="${tid}">×</span>`;
+    div.addEventListener('click', (e) => {
+      if (e.target.classList.contains('del')) return;
+      selectThread(tid);
+    });
+    div.querySelector('.del').addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteThread(tid);
+    });
+    threadListEl.appendChild(div);
+  }
+}
+
+async function createThread() {
+  const threadId = `thread-${Date.now()}`;
+  try {
+    const res = await apiFetch('/threads', {
+      method: 'POST',
+      body: JSON.stringify({ thread_id: threadId, system_instructions: 'You are a helpful coding assistant.', max_iterations: 20 }),
+    });
+    const data = await res.json();
+    state.threads.push(data.thread_id);
+    renderThreadList();
+    selectThread(data.thread_id);
+    addMessage('system', `Thread "${data.thread_id}" created`);
+  } catch (err) {
+    addMessage('error', `Failed to create thread: ${err.message}`);
+  }
+}
+
+async function deleteThread(tid) {
+  try {
+    await apiFetch(`/threads/${encodeURIComponent(tid)}`, { method: 'DELETE' });
+    state.threads = state.threads.filter(t => t !== tid);
+    if (state.activeThreadId === tid) {
+      state.activeThreadId = null;
+      messagesEl.innerHTML = '<div class="empty-state"><div style="font-size:48px;">💬</div><p>Select or create a thread</p></div>';
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+    }
+    renderThreadList();
+  } catch (err) {
+    addMessage('error', `Failed to delete thread: ${err.message}`);
+  }
+}
+
+async function selectThread(tid) {
+  state.activeThreadId = tid;
+  renderThreadList();
+  inputEl.disabled = false;
+  sendBtn.disabled = false;
+  inputEl.focus();
+
+  // Load event history
+  messagesEl.innerHTML = '<div style="text-align:center;color:#555;padding:20px;">Loading events...</div>';
+  try {
+    const res = await apiFetch(`/threads/${encodeURIComponent(tid)}/events`);
+    const data = await res.json();
+    messagesEl.innerHTML = '';
+    for (const event of data.events || []) {
+      renderEvent(event);
+    }
+  } catch {
+    messagesEl.innerHTML = '';
+    addMessage('system', `Selected thread: ${tid}`);
+  }
+}
+
+// ── Message rendering ──────────────────────────────────────────────────
+
+function addMessage(role, content, timestamp) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  const ts = timestamp || new Date().toLocaleTimeString();
+  div.innerHTML = `<div class="role">${role}</div><div class="content">${escapeHtml(content)}</div><div class="timestamp">${ts}</div>`;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function renderEvent(event) {
+  const type = Object.keys(event)[0];
+  const data = event[type];
+  if (!data) return;
+
+  switch (type) {
+    case 'turn_started':
+      addMessage('system', `Turn started: ${data.turn_id || ''}`);
+      break;
+    case 'agent_message_delta':
+      // Accumulate deltas into the last assistant message
+      const lastMsg = messagesEl.lastElementChild;
+      if (lastMsg && lastMsg.classList.contains('assistant')) {
+        const contentEl = lastMsg.querySelector('.content');
+        contentEl.textContent += data.content || '';
+      } else {
+        addMessage('assistant', data.content || '');
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      break;
+    case 'tool_call_begin':
+      addMessage('tool-call', `🔧 ${data.tool_call?.name || 'tool'}(${JSON.stringify(data.tool_call?.arguments || {})})`);
+      break;
+    case 'tool_call_end':
+      addMessage('tool-result', (data.result?.output || data.result?.error || '(no output)'));
+      break;
+    case 'turn_complete':
+      addMessage('system', `✓ Turn complete`);
+      break;
+    case 'error':
+      addMessage('error', `❌ ${data.message || 'Unknown error'}`);
+      break;
+    case 'token_usage':
+      // Don't show token usage in chat
+      break;
+    default:
+      addMessage('system', JSON.stringify(event));
+  }
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ── Send message (SSE) ─────────────────────────────────────────────────
+
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || !state.activeThreadId || state.streaming) return;
+
+  inputEl.value = '';
+  addMessage('user', text);
+  state.streaming = true;
+  sendBtn.disabled = true;
+  inputEl.disabled = true;
+  statusEl.textContent = 'streaming...';
+  statusEl.className = '';
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.apiKey) {
+      headers['Authorization'] = `Bearer ${state.apiKey}`;
+    }
+
+    const res = await fetch(`${BASE}/threads/${encodeURIComponent(state.activeThreadId)}/turns`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ message: text }),
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      let currentEvent = '';
+      let currentData = '';
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          currentData = line.slice(6).trim();
+        } else if (line === '' && currentData) {
+          // Empty line = end of event
+          try {
+            const parsed = JSON.parse(currentData);
+            renderEvent(parsed);
+          } catch {}
+          currentEvent = '';
+          currentData = '';
+        }
+      }
+    }
+  } catch (err) {
+    addMessage('error', `Error: ${err.message}`);
+  } finally {
+    state.streaming = false;
+    sendBtn.disabled = false;
+    inputEl.disabled = false;
+    inputEl.focus();
+    statusEl.textContent = 'connected';
+    statusEl.className = 'connected';
+  }
+}
+
+// ── Event listeners ────────────────────────────────────────────────────
+
+newThreadBtn.addEventListener('click', createThread);
+
+sendBtn.addEventListener('click', sendMessage);
+
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// Auto-resize textarea
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+});
+
+// ── Init ───────────────────────────────────────────────────────────────
+
+statusEl.textContent = 'connected';
+statusEl.className = 'connected';
+</script>
+</body>
+</html>
