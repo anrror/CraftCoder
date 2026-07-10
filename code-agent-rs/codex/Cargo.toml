@@ -15,7 +15,7 @@ walkdir = "2"
 ignore = "0.4"
 log = "0.4"
 thiserror = "2"
-notify = "7"
+notify = "8"
 blake3 = "1"
 code-agent-core = { path = "../core" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
