@@ -31,7 +31,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # OpenTelemetry — optional, for production OTLP export
-opentelemetry = { version = "0.24", optional = true }
+opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.24", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.17", optional = true }
 tracing-opentelemetry = { version = "0.25", optional = true }
