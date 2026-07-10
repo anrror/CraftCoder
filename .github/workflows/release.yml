@@ -81,7 +81,7 @@ jobs:
           pattern: ai-coding-agent-*
           merge-multiple: true
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ai-coding-agent-*
           generate_release_notes: true
