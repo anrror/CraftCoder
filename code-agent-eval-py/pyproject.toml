@@ -1,0 +1,32 @@
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[project]
+name = "code-agent-eval"
+version = "0.1.0"
+description = "Python evaluation environment for AI Coding Agent — supports SWE-bench-Live and HumanEval"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "docker>=7.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.0",
+]
+
+[project.scripts]
+code-agent-eval = "code_agent_eval.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "skip_if_no_docker: skip test when Docker daemon is unavailable",
+]

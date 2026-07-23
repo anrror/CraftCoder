@@ -1,0 +1,165 @@
+{
+  "name": "code-agent-vscode",
+  "displayName": "AI Coding Agent",
+  "description": "VS Code extension for AI-powered coding assistance via the Code Agent App Server",
+  "version": "0.1.0",
+  "publisher": "code-agent",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "coding",
+    "agent",
+    "assistant",
+    "code generation"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:code-agent.start",
+    "onCommand:code-agent.chat",
+    "onCommand:code-agent.fix",
+    "onCommand:code-agent.stop",
+    "onView:code-agent.sessions"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "code-agent.start",
+        "title": "Start Agent",
+        "category": "Code Agent"
+      },
+      {
+        "command": "code-agent.chat",
+        "title": "Open Chat",
+        "category": "Code Agent"
+      },
+      {
+        "command": "code-agent.fix",
+        "title": "Fix This",
+        "category": "Code Agent"
+      },
+      {
+        "command": "code-agent.stop",
+        "title": "Stop Agent",
+        "category": "Code Agent"
+      },
+      {
+        "command": "code-agent.newThread",
+        "title": "New Thread",
+        "category": "Code Agent"
+      },
+      {
+        "command": "code-agent.forkThread",
+        "title": "Fork Thread",
+        "category": "Code Agent"
+      },
+      {
+        "command": "code-agent.archiveThread",
+        "title": "Archive Thread",
+        "category": "Code Agent"
+      }
+    ],
+    "views": {
+      "code-agent": [
+        {
+          "id": "code-agent.sessions",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "code-agent",
+          "title": "Code Agent",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "code-agent.newThread",
+          "when": "view == code-agent.sessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "code-agent.forkThread",
+          "when": "view == code-agent.sessions && viewItem == thread",
+          "group": "inline"
+        },
+        {
+          "command": "code-agent.archiveThread",
+          "when": "view == code-agent.sessions && viewItem == thread",
+          "group": "inline"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "code-agent.fix",
+          "when": "editorHasSelection",
+          "group": "code-agent"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Code Agent",
+      "properties": {
+        "codeAgent.appServerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the code-agent-app-server binary. If empty, uses the extension's bundled binary."
+        },
+        "codeAgent.modelName": {
+          "type": "string",
+          "default": "",
+          "description": "Model name to use (passed to app-server)."
+        },
+        "codeAgent.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the app server on VS Code startup."
+        },
+        "codeAgent.maxIterations": {
+          "type": "number",
+          "default": 20,
+          "description": "Maximum ReAct loop iterations per turn."
+        },
+        "codeAgent.diffPreviewMode": {
+          "type": "string",
+          "default": "inline",
+          "enum": ["inline", "side-by-side", "none"],
+          "description": "How to display code diffs from the agent."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3",
+    "eslint": "^8.56.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0"
+  },
+  "dependencies": {
+    "diff": "^5.1.0"
+  }
+}

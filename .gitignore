@@ -1,0 +1,72 @@
+# Rust
+code-agent-rs/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+code-agent-vscode/node_modules/
+code-agent-vscode/out/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.pdm-build/
+*.egg-info/
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build artifacts
+**/target*/
+
+# === AI / Dev tooling ===
+.ai/
+.omo/
+.agents/
+.opencode/
+.codex/
+.claude/
+.cursor/
+.copilot/
+.windsurf/
+.craftcoder/
+.playwright-mcp/
+
+# === Environment & Secrets ===
+.env
+.env.*
+*.env
+!.env.example
+*.local
+*.secret
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+credentials*
+secrets*
+
+# === Temporary ===
+*.tmp
+*.temp
+*.bak
+*.orig

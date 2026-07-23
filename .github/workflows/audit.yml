@@ -1,0 +1,32 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # weekly on Sunday
+  push:
+    branches: [main]
+    paths:
+      - "code-agent-rs/**/Cargo.lock"
+      - "code-agent-rs/**/Cargo.toml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "code-agent-rs/**/Cargo.lock"
+      - "code-agent-rs/**/Cargo.toml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run audit
+        run: cargo audit --manifest-path code-agent-rs/Cargo.toml
