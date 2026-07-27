@@ -25,7 +25,9 @@ pub struct ReadFileTool {
 
 impl Default for ReadFileTool {
     fn default() -> Self {
-        Self { max_chars: 10_000 }
+        Self {
+            max_chars: 10_000,
+        }
     }
 }
 
@@ -35,6 +37,10 @@ impl ReadFileTool {
         Self { max_chars }
     }
 }
+
+/// P0-2: 单次读取文件最大字节数（10 MiB）。超过此大小的文件直接拒绝，
+/// 不执行 `read_to_string` 以防止 OOM / DoS。
+const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;  // 10 MiB
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -77,7 +83,19 @@ impl Tool for ReadFileTool {
         let offset = optional_u64(&params, "offset").unwrap_or(0) as usize;
         let limit = optional_u64(&params, "limit");
 
-        let content = std::fs::read_to_string(&path).map_err(|e| {
+        let canonical_path = crate::tools::resolve_safe_path(&path)?;
+
+        // P0-2: 检查文件大小，超过 10 MiB 拒绝读取以防 OOM
+        if let Ok(meta) = std::fs::metadata(&canonical_path) {
+            if meta.is_file() && meta.len() > MAX_FILE_SIZE_BYTES {
+                return Err(ToolError::execution_error(format!(
+                    "file too large: {} bytes exceeds {MAX_FILE_SIZE_BYTES} bytes limit",
+                    meta.len()
+                )));
+            }
+        }
+
+        let content = std::fs::read_to_string(&canonical_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ToolError::execution_error(format!("file not found: {path}"))
             } else {

@@ -27,6 +27,39 @@ use code_agent_core::tools::Tool;
 use code_agent_core::tools::registry::ToolRegistry;
 
 // ---------------------------------------------------------------------------
+// P0-3: 子进程环境变量过滤 — 防止 LLM_API_KEY 等凭据泄露
+// ---------------------------------------------------------------------------
+
+/// 敏感环境变量名称列表 — 在派生子进程前从环境中清除。
+///
+/// 防止 MCP / LSP / shell 等外部进程继承凭据和内部配置信息。
+const SENSITIVE_ENV_VARS: &[&str] = &[
+    "LLM_API_KEY",
+    "LLM_API_BASE",
+    "LLM_API_BASE_URL",
+    "LLM_MODEL",
+    "LLM_CHAT_MODEL",
+    "LLM_TIMEOUT",
+    "LLM_MAX_TOKENS",
+    "WEB_API_KEY",
+    "CODE_AGENT_ALLOW_MCP_ENV",
+    "CODE_AGENT_ALLOW_MCP_HTTP",
+    "RUST_LOG",
+    "RUST_BACKTRACE",
+];
+
+/// 从 `tokio::process::Command` 中清除敏感环境变量。
+///
+/// 应在调用 `.spawn()` 之前调用此函数。
+/// 保留 `PATH`、`HOME`、`TEMP` 等系统变量，
+/// 仅移除 `SENSITIVE_ENV_VARS` 列表中的键。
+pub fn filter_sensitive_env(cmd: &mut tokio::process::Command) {
+    for var in SENSITIVE_ENV_VARS {
+        cmd.env_remove(var);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Canonical tool registration
 // ---------------------------------------------------------------------------
 
@@ -57,11 +90,11 @@ pub fn register_all_core_tools(registry: &mut dyn ToolRegistry) -> usize {
 
     let file_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadFileTool::default()),
-        Arc::new(WriteFileTool::default()),
-        Arc::new(EditFileTool::default()),
-        Arc::new(ListDirTool::default()),
-        Arc::new(GrepTool::default()),
-        Arc::new(GlobTool::default()),
+        Arc::new(WriteFileTool),
+        Arc::new(EditFileTool),
+        Arc::new(ListDirTool),
+        Arc::new(GrepTool),
+        Arc::new(GlobTool),
     ];
 
     for tool in file_tools {

@@ -40,7 +40,7 @@ use super::snapshot::{SessionSnapshot, ToolCallSnapshot, TurnSnapshot};
 /// store.save_session(&snapshot).unwrap();
 /// let restored = store.resume(&SessionId::from("my-session")).unwrap();
 /// ```
-
+///
 ///                     ?   --                              ?
 ///
 ///                   SessionStore         ?Agent                        ?SQLite               ?
@@ -54,7 +54,7 @@ impl SessionStore {
 
     /// Open (or create) a SQLite database at the given path and ensure the
     /// schema is up to date.
-
+    ///
     ///                      SQLite                                 ?
     pub fn open<P: AsRef<Path>>(path: P) -> SqliteResult<Self> {
         let conn = Connection::open(path.as_ref())?;
@@ -90,7 +90,7 @@ impl SessionStore {
     ///
     /// Uses `INSERT OR REPLACE` so it is safe to call multiple times for the
     /// same session (each call updates `updated_at` and refreshes state).
-
+    ///
     ///                                 ?
     ///
     ///        INSERT OR REPLACE                                            ?
@@ -100,8 +100,8 @@ impl SessionStore {
         self.conn.execute(
             "INSERT OR REPLACE INTO sessions
              (id, status, permission_mode, system_instructions, max_iterations,
-              turn_count, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+              turn_count, user_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 snapshot.id.0,
                 serde_json::to_string(&snapshot.status).unwrap_or_default(),
@@ -109,6 +109,7 @@ impl SessionStore {
                 snapshot.system_instructions,
                 snapshot.max_iterations as i64,
                 snapshot.turn_count as i64,
+                snapshot.user_id,
                 snapshot.created_at.to_rfc3339(),
                 now,
             ],
@@ -122,7 +123,7 @@ impl SessionStore {
     ///
     /// Call this after every [`Session::run_turn`] invocation to enable crash
     /// recovery and resume.
-
+    ///
     ///                                          ?                        
     ///
     ///        Session::run_turn                                                         ?
@@ -199,7 +200,7 @@ impl SessionStore {
     }
 
     /// Update session status (e.g., mark as paused, completed, archived).
-
+    ///
     ///                                                             
     pub fn update_status(
         &self,
@@ -224,7 +225,7 @@ impl SessionStore {
     ///
     /// Returns `Ok(Some(snapshot))` if the session exists, `Ok(None)` if it
     /// does not, or `Err(...)` on database failure.
-
+    ///
     ///                         
     ///
     ///        Ok(Some(snapshot))                      Ok(None)                  ?
@@ -232,7 +233,7 @@ impl SessionStore {
         // Load session row
         let mut stmt = self.conn.prepare(
             "SELECT id, status, permission_mode, system_instructions, max_iterations,
-                    turn_count, created_at, updated_at
+                    turn_count, user_id, created_at, updated_at
              FROM sessions WHERE id = ?1",
         )?;
 
@@ -244,8 +245,9 @@ impl SessionStore {
                 system_instructions: row.get::<_, String>(3)?,
                 max_iterations: row.get::<_, i64>(4)?,
                 turn_count: row.get::<_, i64>(5)?,
-                created_at: row.get::<_, String>(6)?,
-                updated_at: row.get::<_, String>(7)?,
+                user_id: row.get::<_, String>(6)?,
+                created_at: row.get::<_, String>(7)?,
+                updated_at: row.get::<_, String>(8)?,
             })
         });
 
@@ -370,6 +372,7 @@ impl SessionStore {
             system_instructions: session_row.system_instructions,
             max_iterations: session_row.max_iterations as usize,
             turn_count: session_row.turn_count as u64,
+            user_id: session_row.user_id,
             messages,
             turns,
             created_at,
@@ -378,7 +381,7 @@ impl SessionStore {
     }
 
     /// List all session IDs in the database.
-
+    ///
     ///                              ?ID
     pub fn list_sessions(&self) -> SqliteResult<Vec<SessionId>> {
         let mut stmt = self
@@ -399,7 +402,7 @@ impl SessionStore {
     ///
     /// Archived sessions are marked with `status = 'archived'` in the database
     /// but their data is preserved. Returns the number of sessions archived.
-
+    ///
     ///                                           
     ///
     ///                          "archived"                                                      ?
@@ -434,7 +437,7 @@ impl SessionStore {
     ///
     /// Returns the number of sessions deleted. Cascade deletes will also
     /// remove associated turns, tool_calls, and events.
-
+    ///
     ///                                                 
     ///
     ///                                                                                 ?
@@ -464,7 +467,7 @@ impl SessionStore {
     }
 
     /// Delete a session and all associated data (cascading).
-
+    ///
     ///                                                      ?
     pub fn delete_session(&self, session_id: &SessionId) -> SqliteResult<()> {
         self.conn.execute(
@@ -488,6 +491,7 @@ struct SessionRow {
     system_instructions: String,
     max_iterations: i64,
     turn_count: i64,
+    user_id: String,
     created_at: String,
     updated_at: String,
 }
@@ -510,7 +514,7 @@ struct EventRow {
 // ---------------------------------------------------------------------------
 
 /// Serialize a `ResponseEvent` to a (type_tag, json) pair for storage.
-
+///
 ///   ?ResponseEvent              (            , JSON)                        ?
 fn serialize_event(event: &ResponseEvent) -> (String, String) {
     let (tag, data) = match event {
@@ -566,7 +570,7 @@ fn serialize_event(event: &ResponseEvent) -> (String, String) {
 }
 
 /// Deserialize a (type_tag, json) pair back into a `ResponseEvent`.
-
+///
 ///   ?(            , JSON)                        ?ResponseEvent
 fn deserialize_event(tag: &str, data: &str) -> Option<ResponseEvent> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
@@ -623,6 +627,7 @@ mod tests {
             "You are a test assistant.".into(),
             10,
             PermissionMode::Auto,
+            String::new(),
         )
     }
 
@@ -1004,6 +1009,7 @@ mod tests {
                 "".into(),
                 10,
                 PermissionMode::Auto,
+                String::new(),
             ))
             .unwrap();
         store
@@ -1012,6 +1018,7 @@ mod tests {
                 "".into(),
                 10,
                 PermissionMode::Auto,
+                String::new(),
             ))
             .unwrap();
 

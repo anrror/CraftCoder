@@ -310,6 +310,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[code_agent_core::model::ToolDefinition],
+            _temperature: Option<f32>,
         ) -> ModelResult<Box<dyn stream::Stream<Item = ResponseEvent> + Send + Unpin>> {
             let mut responses = self.responses.lock().unwrap();
 

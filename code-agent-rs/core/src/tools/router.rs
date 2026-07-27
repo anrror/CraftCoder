@@ -25,7 +25,8 @@ use code_agent_protocol::ToolCall;
 
 use super::permission::PermissionEnforcer;
 use super::registry::ToolRegistry;
-use super::{tool_error, ToolDefinition, ToolError, ToolEvent, ToolHook, ToolResultMessage};
+use super::{tool_error, ToolDefinition, ToolError, ToolResultMessage};
+use super::hook::{ToolEvent, ToolHook};
 
 /// 工具调用路由器 —— 编排工具调用的完整生命周期
 ///
@@ -38,6 +39,8 @@ pub struct ToolRouter {
     registry: Arc<dyn ToolRegistry>,
     permission: Arc<PermissionEnforcer>,
     hooks: Vec<Arc<dyn ToolHook>>,
+    /// C12: 工具执行全局超时（秒）。默认 300（5 分钟）。
+    timeout_secs: u64,
 }
 
 impl ToolRouter {
@@ -54,7 +57,14 @@ impl ToolRouter {
             registry,
             permission,
             hooks: Vec::new(),
+            timeout_secs: 300,
         }
+    }
+
+    /// C12: 设置工具执行全局超时（秒）。
+    pub fn with_timeout(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
     }
 
     /// 注册一个工具生命周期钩子（Phase F）。
@@ -103,8 +113,9 @@ impl ToolRouter {
         // 0. Pre-execute hooks
         for hook in &self.hooks {
             hook.on_event(&ToolEvent::PreExecute {
-                call,
-                tool_name: &call.name,
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                params_hash: hash_params(&call.arguments),
             });
         }
 
@@ -125,10 +136,15 @@ impl ToolRouter {
             return result;
         }
 
-        // 3. Execute
-        let mut result = match tool.execute(call.arguments.clone()).await {
-            Ok(result) => result,
-            Err(e) => tool_error(&call.id, e.to_string()),
+        // 3. Execute (C12: 带全局超时保护)
+        let timeout_dur = std::time::Duration::from_secs(self.timeout_secs);
+        let mut result = match tokio::time::timeout(timeout_dur, tool.execute(call.arguments.clone())).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => tool_error(&call.id, e.to_string()),
+            Err(_elapsed) => tool_error(
+                &call.id,
+                format!("tool '{}' timed out after {} seconds", tool.name(), self.timeout_secs),
+            ),
         };
         result.tool_call_id = call.id.clone();
 
@@ -143,8 +159,9 @@ impl ToolRouter {
         let duration_ms = start.elapsed().as_millis() as u64;
         for hook in &self.hooks {
             hook.on_event(&ToolEvent::PostExecute {
-                call,
-                result,
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                result: result.clone(),
                 duration_ms,
             });
         }
@@ -172,6 +189,17 @@ impl ToolRouter {
     pub fn registry(&self) -> Arc<dyn ToolRegistry> {
         Arc::clone(&self.registry)
     }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────
+
+/// 计算工具参数的简单指纹哈希（用于钩子日志）。
+fn hash_params(params: &serde_json::Value) -> String {
+    use std::hash::{Hash, Hasher};
+    let s = params.to_string();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +238,7 @@ mod tests {
                 ToolEvent::PostExecute { .. } => {
                     self.post_count.fetch_add(1, Ordering::SeqCst);
                 }
+                _ => {} // new v2 events not relevant here
             }
         }
     }

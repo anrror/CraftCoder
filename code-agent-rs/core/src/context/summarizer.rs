@@ -40,7 +40,7 @@ impl SemanticSummarizer for LlmSummarizer {
 
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                match handle.block_on(self.model.complete(&messages, &[])) {
+                match handle.block_on(self.model.complete(&messages, &[], None)) {
                     Ok(summary) => {
                         let trimmed = summary.trim();
                         format!("[LLM Summary - AutoCompact]\n\n{}", trimmed)

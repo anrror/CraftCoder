@@ -54,6 +54,11 @@ impl Tool for GlobTool {
 
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResultMessage, ToolError> {
         let pattern = require_string(&params, "pattern")?;
+        if pattern.contains("..") {
+            return Err(ToolError::execution_error(
+                format!("Access denied: pattern '{pattern}' contains '..' which could escape workspace"),
+            ));
+        }
 
         let paths = glob::glob(&pattern).map_err(|e| {
             ToolError::invalid_input(format!("invalid glob pattern: {e}"))

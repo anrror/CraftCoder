@@ -59,7 +59,7 @@ pub mod config;
 
 pub use config::{CapabilityLevel, PermissionMode, SessionStatus};
 pub use execution::{ResponseEvent, TurnInput};
-pub use identity::{SessionId, ThreadId, TurnId};
+pub use identity::{SessionId, ThreadId, TurnId, UserId};
 pub use message::{Message, ToolCall, ToolResultMessage};
 
 // ── 测试 (Tests) ──────────────────────────────────────────────────────

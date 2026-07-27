@@ -29,10 +29,13 @@
 //! manager.load_all().await?;
 //! ```
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use super::command::Command;
 use super::registry::ToolRegistry;
+use super::Tool;
 
 // ---------------------------------------------------------------------------
 // Plugin trait
@@ -78,20 +81,34 @@ pub trait Plugin: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// MCP Plugin — 将 MCP 服务器连接包装为 Plugin
+// McpConnector — MCP 连接器抽象
 // ---------------------------------------------------------------------------
 
-/// MCP 插件 —— 将外部 MCP 服务器连接包装为 Plugin。
+/// MCP 连接器 —— 将 MCP 连接配置转化为 Tool 实例列表。
 ///
-/// 【领域含义】通过 MCP 协议连接到远程工具服务器，将发现的工具
-/// 动态注册到本地 ToolRegistry。
+/// 【领域含义】这是 `core` crate 中的抽象接口，用于在插件系统中
+/// 注入实际的 MCP 连接能力。具体实现在 `code-agent-tools` crate 中
+/// （例如 `McpClientConnector`）。
 ///
-/// 【核心职责】建立 MCP 连接 → 发现远程工具 → 本地注册。
-pub struct McpPlugin {
-    name: String,
-    server_name: String,
-    _connection_config: McpConnectionConfig,
+/// 【核心职责】根据 `McpConnectionConfig` 配置连接到 MCP 服务器，
+/// 发现远程工具，返回实现了 `Tool` trait 的工具实例列表。
+#[async_trait]
+pub trait McpConnector: Send + Sync {
+    /// 连接到 MCP 服务器，返回发现的工具列表。
+    ///
+    /// 【领域含义】接收连接配置，建立 MCP 连接，执行工具发现握手，
+    /// 将远程工具包装为本地 `Tool` trait 对象。
+    ///
+    /// 【核心职责】连接 → 发现 → 包装 → 返回。
+    async fn connect(
+        &self,
+        config: &McpConnectionConfig,
+    ) -> Result<Vec<Arc<dyn Tool>>, Box<dyn std::error::Error>>;
 }
+
+// ---------------------------------------------------------------------------
+// MCP Connection Config
+// ---------------------------------------------------------------------------
 
 /// MCP 连接配置。
 #[derive(Clone, Debug)]
@@ -107,13 +124,58 @@ pub enum McpConnectionConfig {
     },
 }
 
+// ---------------------------------------------------------------------------
+// MCP Plugin — 将 MCP 服务器连接包装为 Plugin
+// ---------------------------------------------------------------------------
+
+/// MCP 插件 —— 将外部 MCP 服务器连接包装为 Plugin。
+///
+/// 【领域含义】通过 MCP 协议连接到远程工具服务器，将发现的工具
+/// 动态注册到本地 ToolRegistry。
+///
+/// 【核心职责】建立 MCP 连接 → 发现远程工具 → 本地注册。
+///
+/// # 使用示例
+///
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// use code_agent_core::tools::plugin::{McpPlugin, McpConnectionConfig, McpConnector};
+/// use code_agent_core::tools::registry::ToolRegistry;
+///
+/// // connector 由 `code-agent-tools` 提供
+/// let plugin = McpPlugin::new(
+///     "my-server",
+///     "my-server",
+///     McpConnectionConfig::Http { url: "http://localhost:3000".into() },
+///     Box::new(MyConnector),
+/// );
+/// ```
+pub struct McpPlugin {
+    name: String,
+    server_name: String,
+    connection_config: McpConnectionConfig,
+    connector: Box<dyn McpConnector>,
+}
+
 impl McpPlugin {
     /// 创建 MCP 插件。
-    pub fn new(name: impl Into<String>, server_name: impl Into<String>, config: McpConnectionConfig) -> Self {
+    ///
+    /// 【参数】
+    /// - `name`: 插件名称
+    /// - `server_name`: MCP 服务器名称
+    /// - `config`: 连接配置（stdio 或 HTTP）
+    /// - `connector`: 实现了 `McpConnector` 的连接器实例
+    pub fn new(
+        name: impl Into<String>,
+        server_name: impl Into<String>,
+        config: McpConnectionConfig,
+        connector: Box<dyn McpConnector>,
+    ) -> Self {
         Self {
             name: name.into(),
             server_name: server_name.into(),
-            _connection_config: config,
+            connection_config: config,
+            connector,
         }
     }
 }
@@ -125,14 +187,16 @@ impl Plugin for McpPlugin {
     }
 
     async fn load(&self, registry: &mut dyn ToolRegistry) -> Result<(), Box<dyn std::error::Error>> {
-        // 连接 MCP 服务器
-        // 注册远程工具到本地 registry
-        // 注意：实际 MCP 工具发现逻辑在 code-agent-tools crate 中
-        let _ = registry; // 持有引用供后续使用
+        let tools = self.connector.connect(&self.connection_config).await?;
+        let count = tools.len();
+        for tool in tools {
+            registry.register(tool)?;
+        }
         tracing::info!(
             plugin = %self.name,
             server = %self.server_name,
-            "McpPlugin: would connect and discover tools"
+            tool_count = count,
+            "McpPlugin: connected to MCP server and registered tools"
         );
         Ok(())
     }

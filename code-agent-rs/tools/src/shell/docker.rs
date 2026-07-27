@@ -61,7 +61,8 @@ pub async fn execute_in_docker(
     cmd.arg("-w").arg(sandbox_workdir);
     cmd.arg("--security-opt").arg("no-new-privileges:true");
     cmd.arg("--read-only");
-    cmd.arg("--tmpfs").arg("/tmp:exec,size=512M");
+    // M3: noexec prevents code execution from /tmp (defense-in-depth against shell/DLL injection)
+    cmd.arg("--tmpfs").arg("/tmp:noexec,size=512M");
 
     cmd.arg(DEFAULT_IMAGE);
     cmd.arg("/bin/sh").arg("-c").arg(command);

@@ -34,6 +34,7 @@ use super::session_runner::SessionRunner;
 use super::sub_agent::{AgentResult, AgentStatus, SpawnConfig, SpawnTask, SubAgentError, SubAgentHandle};
 use super::sub_agent_manager::SubAgentManagerImpl;
 use crate::model::ModelClient;
+use crate::safety::ContentSafetyLayer;
 use crate::tools::registry::ToolRegistry;
 
 // ---------------------------------------------------------------------------
@@ -194,6 +195,7 @@ impl Delegator {
     /// * `system_instructions` — 子 Agent 的默认系统指令
     /// * `max_iterations` — 子 Agent 的最大迭代次数
     /// * `permission_mode` — 子 Agent 的默认权限模式
+    /// * `safety_layer` — 可选的内容安全审查层（提示注入防御）
     #[allow(clippy::too_many_arguments)]
     pub fn with_config(
         model_client: Arc<dyn ModelClient>,
@@ -203,14 +205,19 @@ impl Delegator {
         system_instructions: impl Into<String>,
         max_iterations: usize,
         permission_mode: PermissionMode,
+        safety_layer: Option<Arc<ContentSafetyLayer>>,
     ) -> Self {
-        let runner = Arc::new(SessionRunner::with_config(
+        let mut runner = SessionRunner::with_config(
             model_client,
             tool_registry,
             system_instructions,
             max_iterations,
             permission_mode,
-        ));
+        );
+        if let Some(ref layer) = safety_layer {
+            runner = runner.with_safety_layer(Arc::clone(layer));
+        }
+        let runner = Arc::new(runner);
         let manager = SubAgentManagerImpl::new_with_runner(max_depth, max_parallel, 0, runner);
         Self {
             manager,
@@ -510,6 +517,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[crate::model::types::ToolDefinition],
+            _temperature: Option<f32>,
         ) -> crate::model::ModelResult<Box<dyn futures::Stream<Item = ResponseEvent> + Send + Unpin>>
         {
             use futures::stream;

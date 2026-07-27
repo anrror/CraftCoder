@@ -17,6 +17,7 @@
 //! code-agent-web
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -45,9 +46,16 @@ struct Cli {
     #[arg(long, default_value = "3000")]
     port: u16,
 
-    /// API key for authentication (default: LLM_API_KEY env var).
-    #[arg(long, env = "LLM_API_KEY")]
+    /// API key for web authentication (default: LLM_API_KEY env var).
+    /// C7/C15: Separated from LLM model API key — use --llm-api-key or LLM_API_KEY
+    /// for the model key instead.
+    #[arg(long, env = "WEB_API_KEY")]
     api_key: Option<String>,
+
+    /// LLM model API key (default: LLM_API_KEY env var).
+    /// C7/C15: Use this for model access; --api-key/WEB_API_KEY is for web auth.
+    #[arg(long, env = "LLM_API_KEY")]
+    llm_api_key: Option<String>,
 
     /// Model name to use for chat completions.
     #[arg(long)]
@@ -68,6 +76,11 @@ struct Cli {
     /// Path to static files directory (optional, for Monaco UI).
     #[arg(long, default_value = "static")]
     static_dir: String,
+
+    /// Allow all origins (CORS). Default: localhost only.
+    /// P1: 生产环境应使用反向代理处理 CORS，而不是在应用层全部放开。
+    #[arg(long)]
+    allow_all_origins: bool,
 
     /// Log level (default: info).
     #[arg(long, default_value = "info")]
@@ -101,22 +114,45 @@ async fn main() {
     // Create model client
     let model_client = create_model_client(ProviderKind::from_model_name(&model_config.model), model_config);
 
-    // Create tool registry and register all built-in tools
+    // Create tool registry and register all built-in tools + MCP plugins
     let mut tool_registry = DefaultToolRegistry::new();
     code_agent_tools::register_all_core_tools(&mut tool_registry);
+    code_agent_tools::mcp::register_from_env(&mut tool_registry);
 
     // Build application state
+    let api_keys = cli.api_key
+        .map(|k| {
+            let mut m = HashMap::new();
+            m.insert(k, String::new());
+            m
+        })
+        .unwrap_or_default();
     let state = Arc::new(
-        AppState::new(cli.api_key)
+        AppState::new(api_keys)
             .with_model_client(model_client)
             .with_tool_registry(Arc::new(tool_registry)),
     );
 
-    // Build CORS layer (allow all origins for local development)
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Build CORS layer — P1: 默认仅允许 localhost，生产环境需显式 opt-in
+    let cors = if cli.allow_all_origins {
+        info!("CORS: allowing all origins (--allow-all-origins enabled)");
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        info!("CORS: restricting to localhost (default)");
+        // Allow http://localhost:* and http://127.0.0.1:*
+        CorsLayer::new()
+            .allow_origin([
+                "http://localhost:3000".parse().unwrap(),
+                "http://localhost:5173".parse().unwrap(),  // Vite dev server
+                "http://127.0.0.1:3000".parse().unwrap(),
+                "http://127.0.0.1:5173".parse().unwrap(),
+            ])
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
 
     // Build router with API routes + static file serving
     let app = routes::build_router(state)
@@ -140,9 +176,11 @@ async fn main() {
 // ---------------------------------------------------------------------------
 
 fn build_model_config(cli: &Cli) -> ModelConfig {
+    // C7/C15: Use separate llm_api_key arg, not web api_key
     let api_key = cli
-        .api_key
+        .llm_api_key
         .clone()
+        .or_else(|| cli.api_key.clone())
         .or_else(|| std::env::var("LLM_API_KEY").ok());
 
     let base_url = cli

@@ -51,6 +51,9 @@ pub struct SessionSnapshot {
     /// Total number of turns executed so far.
     pub turn_count: u64,
 
+    /// Owner user ID (empty string = anonymous/unassigned).
+    pub user_id: String,
+
     /// Conversation history messages (ordered chronologically).
     pub messages: Vec<Message>,
 
@@ -66,13 +69,13 @@ pub struct SessionSnapshot {
 
 impl SessionSnapshot {
     /// Create a new snapshot representing an empty session.
-
     ///                                 ?
     pub fn new(
         id: SessionId,
         system_instructions: String,
         max_iterations: usize,
         permission_mode: PermissionMode,
+        user_id: String,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -82,6 +85,7 @@ impl SessionSnapshot {
             system_instructions,
             max_iterations,
             turn_count: 0,
+            user_id,
             messages: Vec::new(),
             turns: Vec::new(),
             created_at: now,
@@ -163,6 +167,7 @@ mod tests {
             "You are helpful.".into(),
             20,
             PermissionMode::Auto,
+            String::new(),
         );
 
         assert_eq!(snap.id.0, "test");
@@ -171,6 +176,7 @@ mod tests {
         assert_eq!(snap.system_instructions, "You are helpful.");
         assert_eq!(snap.max_iterations, 20);
         assert_eq!(snap.turn_count, 0);
+        assert!(snap.user_id.is_empty());
         assert!(snap.messages.is_empty());
         assert!(snap.turns.is_empty());
         assert!(snap.created_at <= Utc::now());
@@ -186,6 +192,7 @@ mod tests {
             system_instructions: "sys".into(),
             max_iterations: 10,
             turn_count: 1,
+            user_id: "user-1".into(),
             messages: vec![Message::UserMessage {
                 content: "hello".into(),
             }],

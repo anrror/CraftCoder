@@ -412,20 +412,22 @@ impl GeminiClient {
     }
 
     /// Full URL for the streaming generateContent endpoint.
+    /// API key is sent via `x-goog-api-key` header, not in URL query (C5).
     fn stream_url(&self) -> String {
         let base = self.config.api_base_url.trim_end_matches('/');
         format!(
-            "{}/models/{}:streamGenerateContent?alt=sse&key={}",
-            base, self.config.model, self.config.api_key
+            "{}/models/{}:streamGenerateContent?alt=sse",
+            base, self.config.model,
         )
     }
 
     /// Full URL for the non-streaming generateContent endpoint.
+    /// API key is sent via `x-goog-api-key` header, not in URL query (C5).
     fn generate_url(&self) -> String {
         let base = self.config.api_base_url.trim_end_matches('/');
         format!(
-            "{}/models/{}:generateContent?key={}",
-            base, self.config.model, self.config.api_key
+            "{}/models/{}:generateContent",
+            base, self.config.model,
         )
     }
 
@@ -495,8 +497,10 @@ impl GeminiClient {
             ModelError::Other("Rate limiter semaphore closed".into())
         })?;
 
+        // C5: API key sent via header, not URL query — prevents key leakage in logs
+        let masked_url = url.replace(&self.config.api_key, "***REDACTED***");
         debug!(
-            url = %url,
+            url = %masked_url,
             num_contents = body.contents.len(),
             "Sending Gemini generateContent request"
         );
@@ -505,6 +509,7 @@ impl GeminiClient {
             .http
             .post(url)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", &self.config.api_key)
             .json(body)
             .send()
             .await?;
@@ -699,6 +704,7 @@ impl ModelClient for GeminiClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>> {
         let (gemini_contents, _system) = convert_messages_gemini(messages);
 
@@ -711,7 +717,7 @@ impl ModelClient for GeminiClient {
                 Some(convert_tools_gemini(tools))
             },
             generation_config: Some(GeminiGenerationConfig {
-                temperature: Some(self.config.temperature),
+                temperature: Some(temperature.unwrap_or(self.config.temperature)),
                 max_output_tokens: Some(self.config.max_tokens),
             }),
         };
@@ -727,6 +733,7 @@ impl ModelClient for GeminiClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<String> {
         let (gemini_contents, _system) = convert_messages_gemini(messages);
 
@@ -739,7 +746,7 @@ impl ModelClient for GeminiClient {
                 Some(convert_tools_gemini(tools))
             },
             generation_config: Some(GeminiGenerationConfig {
-                temperature: Some(self.config.temperature),
+                temperature: Some(temperature.unwrap_or(self.config.temperature)),
                 max_output_tokens: Some(self.config.max_tokens),
             }),
         };
@@ -951,7 +958,8 @@ mod tests {
     // ── URL construction ──
 
     #[test]
-    fn stream_url_contains_model_and_key() {
+    fn stream_url_contains_model_no_key() {
+        // C5: API key is sent via x-goog-api-key header, NOT in URL
         let config = ModelConfig::builder()
             .api_key("test-key".into())
             .model("gemini-pro".into())
@@ -961,7 +969,7 @@ mod tests {
         let client = GeminiClient::new(config);
         let url = client.stream_url();
         assert!(url.contains("gemini-pro"));
-        assert!(url.contains("test-key"));
+        assert!(!url.contains("test-key"), "API key must not appear in URL — C5");
         assert!(url.contains("streamGenerateContent"));
         assert!(url.contains("alt=sse"));
     }

@@ -38,6 +38,7 @@ use super::sub_agent::{AgentResult, SpawnConfig, SpawnTask};
 use super::sub_agent_manager::SubAgentRunner;
 use crate::agent::delegator::Delegator;
 use crate::model::ModelClient;
+use crate::safety::ContentSafetyLayer;
 use crate::tools::registry::ToolRegistry;
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,9 @@ pub struct SessionRunner {
     max_iterations: usize,
     /// 子 Agent 的默认权限模式
     permission_mode: PermissionMode,
+    /// 内容安全审查层（提示注入防御、敏感信息过滤）
+    /// 设置后在 Session::new() 之后调用 with_safety_layer() 附加到每个子 Session
+    safety_layer: Option<Arc<ContentSafetyLayer>>,
     // ── Phase F: Plan 引擎集成 ──────────────────────────────────
     /// Plan 执行配置（可选，默认 PlanConfig::default()）
     plan_config: Option<PlanConfig>,
@@ -87,6 +91,7 @@ impl SessionRunner {
             system_instructions: String::new(),
             max_iterations: 20,
             permission_mode: PermissionMode::Auto,
+            safety_layer: None,
             plan_config: None,
             knowledge_provider: None,
         }
@@ -107,6 +112,7 @@ impl SessionRunner {
             system_instructions: system_instructions.into(),
             max_iterations,
             permission_mode,
+            safety_layer: None,
             plan_config: None,
             knowledge_provider: None,
         }
@@ -123,6 +129,16 @@ impl SessionRunner {
     /// 设置知识提供者（用于 PlanExecutor 的规则/技能注入）。
     pub fn with_knowledge(mut self, provider: Arc<dyn KnowledgeProvider>) -> Self {
         self.knowledge_provider = Some(provider);
+        self
+    }
+
+    /// 设置内容安全审查层（提示注入防御）。
+    ///
+    /// 当设置后，每个由 SessionRunner 创建的子 Agent Session 都会在
+    /// `Session::new()` 之后调用 `session.with_safety_layer()` 附加安全审查。
+    /// 这确保子 Agent（Coder）具有与父 Session 同等级别的注入防御。
+    pub fn with_safety_layer(mut self, layer: Arc<ContentSafetyLayer>) -> Self {
+        self.safety_layer = Some(layer);
         self
     }
 
@@ -288,12 +304,16 @@ impl SubAgentRunner for SessionRunner {
                 .config_override
                 .as_ref()
                 .and_then(|cfg| cfg.token_budget),
+            temperature: None,
         };
 
-        let mut session = match Session::new(config).await {
-            // Session::new 当前不返回 Result，直接构建
-            s => s,
-        };
+        let mut session = Session::new(config).await;
+
+        // 附加安全审查层（提示注入防御、敏感信息过滤）
+        // 确保子 Agent（Coder）具有与父 Session 同等级别的注入防御
+        if let Some(ref safety) = self.safety_layer {
+            session.with_safety_layer(Arc::clone(safety));
+        }
 
         // Step 4: 构建并执行 ReAct 循环
         let input = self.build_turn_input(&task, &thread_id);
@@ -371,6 +391,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[crate::model::types::ToolDefinition],
+            _temperature: Option<f32>,
         ) -> crate::model::ModelResult<Box<dyn futures::Stream<Item = ResponseEvent> + Send + Unpin>>
         {
             use futures::stream;

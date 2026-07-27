@@ -9,7 +9,7 @@ on:
       - 'code-agent-rs/eval/**'
       - 'code-agent-rs/eval-runner/**'
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'code-agent-rs/core/**'
       - 'code-agent-rs/codex/**'

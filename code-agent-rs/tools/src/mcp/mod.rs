@@ -7,15 +7,21 @@
 //! - [`McpClientManager`]: 连接到外部 MCP 服务器
 //! - [`McpServer`]: 将本地工具暴露为 MCP 服务器
 //!
+//! 还提供 [`register_from_env`] 函数，供各入口点（CLI、Web 服务器等）
+//! 从环境变量统一注册 MCP 插件。
+//!
 //! 【核心职责】`McpRegistry` 将本地 `ToolRegistry` 中的工具与已连接 MCP 服务器发现的工具合并，
 //! 提供单一统一的工具目录。
 
+pub mod adapter;
 pub mod client;
+pub mod config;
 pub mod server;
 pub mod types;
 
 use std::sync::Arc;
 
+use code_agent_core::tools::plugin::{McpConnectionConfig, McpPlugin, PluginLoadResult, PluginManager};
 use code_agent_core::tools::registry::ToolRegistry;
 use tokio::sync::RwLock;
 
@@ -305,6 +311,149 @@ pub enum McpRegistryError {
 }
 
 // ---------------------------------------------------------------------------
+// Shared MCP tool registration from environment variables
+// ---------------------------------------------------------------------------
+
+/// 从环境变量注册 MCP 插件到工具注册表。
+///
+/// 【领域含义】供所有入口点（CLI TUI、Exec、AppServer、Web 服务器）
+/// 统一调用，避免各入口点重复实现。按优先级尝试以下来源：
+///
+/// 1. `MCP_SERVERS` 环境变量（JSON 格式，支持多服务器）
+/// 2. `MCP_SERVER_COMMAND` 环境变量（向后兼容，单服务器）
+///
+/// 【核心职责】读取环境变量 → parse_env_config → register_plugins。
+///
+/// **P0-1 安全门控**：仅当环境变量 `CODE_AGENT_ALLOW_MCP_ENV=true` 或 `CODE_AGENT_ALLOW_MCP_ENV=1`
+/// 时才从环境变量加载 MCP 插件。未设置时向 stderr 输出警告并跳过。
+/// 生产环境中应使用配置文件而非环境变量配置 MCP 服务器。
+pub fn register_from_env(registry: &mut dyn ToolRegistry) {
+    // P0-1: 拒绝未经显式 opt-in 的环境变量 MCP 注册
+    let allowed = std::env::var("CODE_AGENT_ALLOW_MCP_ENV")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if !allowed {
+        tracing::warn!(
+            "MCP env registration blocked: set CODE_AGENT_ALLOW_MCP_ENV=true to enable. \
+             Prefer config-file-based MCP configuration for production use."
+        );
+        return;
+    }
+
+    tracing::info!("MCP env registration enabled via CODE_AGENT_ALLOW_MCP_ENV");
+    let configs = parse_env_config();
+    if !configs.is_empty() {
+        register_plugins(configs, registry);
+    }
+}
+
+/// 解析环境变量为 MCP 插件配置元组列表。
+///
+/// 按优先级读取：
+/// 1. `MCP_SERVERS`（JSON 数组，多服务器）
+/// 2. `MCP_SERVER_COMMAND`（空格分隔，单服务器，向后兼容）
+///
+/// 返回 `Vec<(name, McpConnectionConfig)>`，结果可能为空。
+///
+/// 【可测试性】纯函数，不依赖 tokio runtime 或网络 I/O。
+fn parse_env_config() -> Vec<(String, McpConnectionConfig)> {
+    // ── MCP_SERVERS JSON 格式 ───────────────────────────────────
+    if let Ok(json) = std::env::var("MCP_SERVERS") {
+        if !json.trim().is_empty() {
+            if let Ok(configs) = serde_json::from_str::<Vec<EnvMcpEntry>>(&json) {
+                let plugins: Vec<_> = configs
+                    .into_iter()
+                    .filter_map(|entry| {
+                        let name = entry.name.unwrap_or_else(|| "mcp-server".into());
+                        match (entry.command, entry.url) {
+                            (Some(cmd), _) => Some((name, McpConnectionConfig::Stdio {
+                                command: cmd,
+                                args: entry.args.unwrap_or_default(),
+                            })),
+                            (None, Some(url)) => Some((name, McpConnectionConfig::Http { url })),
+                            (None, None) => {
+                                tracing::warn!(entry_name = %name, "MCP_SERVERS entry missing both command and url");
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+
+                if !plugins.is_empty() {
+                    return plugins;
+                }
+            }
+        }
+    }
+
+    // ── MCP_SERVER_COMMAND 回退 ────────────────────────────────
+    let mcp_command = match std::env::var("MCP_SERVER_COMMAND") {
+        Ok(cmd) if !cmd.trim().is_empty() => cmd,
+        _ => return Vec::new(),
+    };
+
+    let parts: Vec<&str> = mcp_command.split_whitespace().collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+
+    vec![(
+        "mcp-env".into(),
+        McpConnectionConfig::Stdio {
+            command: parts[0].to_string(),
+            args: parts[1..].iter().map(|s| s.to_string()).collect(),
+        },
+    )]
+}
+
+/// `MCP_SERVERS` JSON 数组中的单个条目。
+#[derive(serde::Deserialize)]
+struct EnvMcpEntry {
+    name: Option<String>,
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    url: Option<String>,
+}
+
+/// 内部：注册一组 MCP 插件到工具注册表。
+fn register_plugins(
+    configs: Vec<(String, McpConnectionConfig)>,
+    registry: &mut dyn ToolRegistry,
+) {
+    let rt = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle,
+        Err(_) => {
+            tracing::warn!("Cannot register MCP plugins: no tokio runtime available");
+            return;
+        }
+    };
+
+    rt.block_on(async {
+        let mut pm = PluginManager::new();
+
+        for (name, conn_cfg) in configs {
+            let connector = adapter::McpClientConnector::new();
+            let plugin = McpPlugin::new(name.clone(), name, conn_cfg, Box::new(connector));
+            pm.register(Box::new(plugin));
+        }
+
+        let results = pm.load_all(registry).await;
+        for result in &results {
+            match result {
+                PluginLoadResult::Success { name } => {
+                    tracing::info!(plugin = %name, "MCP plugin registered successfully");
+                }
+                PluginLoadResult::Failed { name, error } => {
+                    tracing::warn!(plugin = %name, error = %error, "MCP plugin failed to load");
+                }
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -313,6 +462,28 @@ mod tests {
     use super::*;
     use code_agent_core::tools::builtin::{glob::GlobTool, read_file::ReadFileTool};
     use code_agent_core::tools::registry::DefaultToolRegistry;
+
+    // ── helpers ────────────────────────────────────────────────────────
+
+    /// 设置临时环境变量，在闭包结束后自动恢复。
+    fn with_env_var<K, V, R>(key: K, val: Option<V>, f: impl FnOnce() -> R) -> R
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let key = key.as_ref();
+        let prev = std::env::var(key).ok();
+        match val {
+            Some(v) => std::env::set_var(key, v.as_ref()),
+            None => std::env::remove_var(key),
+        }
+        let result = f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        result
+    }
 
     fn make_registry() -> Arc<dyn ToolRegistry> {
         let mut reg = DefaultToolRegistry::new();
@@ -366,5 +537,138 @@ mod tests {
         mcp.create_server().expect("create_server should succeed");
         assert!(mcp.server.is_some());
         assert_eq!(mcp.server.as_ref().unwrap().tool_count(), 2);
+    }
+
+    // ── parse_env_config tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_env_no_vars_returns_empty() {
+        with_env_var("MCP_SERVERS", None::<&str>, || {
+            with_env_var("MCP_SERVER_COMMAND", None::<&str>, || {
+                let result = parse_env_config();
+                assert!(result.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn parse_env_empty_vars_returns_empty() {
+        with_env_var("MCP_SERVERS", Some(""), || {
+            with_env_var("MCP_SERVER_COMMAND", Some(""), || {
+                let result = parse_env_config();
+                assert!(result.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn parse_env_server_command_single() {
+        with_env_var("MCP_SERVERS", None::<&str>, || {
+            with_env_var("MCP_SERVER_COMMAND", Some("npx -y @mcp/server ."), || {
+                let result = parse_env_config();
+                assert_eq!(result.len(), 1);
+                assert_eq!(result[0].0, "mcp-env");
+                match &result[0].1 {
+                    McpConnectionConfig::Stdio { command, args } => {
+                        assert_eq!(command, "npx");
+                        assert_eq!(args, &["-y", "@mcp/server", "."]);
+                    }
+                    _ => panic!("expected Stdio variant"),
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn parse_env_server_command_whitespace_only() {
+        with_env_var("MCP_SERVERS", None::<&str>, || {
+            with_env_var("MCP_SERVER_COMMAND", Some("   "), || {
+                let result = parse_env_config();
+                assert!(result.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn parse_env_mcp_servers_json_multi() {
+        with_env_var("MCP_SERVER_COMMAND", None::<&str>, || {
+            with_env_var(
+                "MCP_SERVERS",
+                Some(r#"[
+                    {"name":"fs","command":"npx","args":["-y","server-fs","."]},
+                    {"name":"github","url":"http://localhost:3000/mcp"}
+                ]"#),
+                || {
+                    let result = parse_env_config();
+                    assert_eq!(result.len(), 2);
+
+                    // fs: stdio
+                    assert_eq!(result[0].0, "fs");
+                    match &result[0].1 {
+                        McpConnectionConfig::Stdio { command, args } => {
+                            assert_eq!(command, "npx");
+                            assert!(args.contains(&"-y".to_string()));
+                        }
+                        _ => panic!("expected Stdio"),
+                    }
+
+                    // github: http
+                    assert_eq!(result[1].0, "github");
+                    match &result[1].1 {
+                        McpConnectionConfig::Http { url } => {
+                            assert_eq!(url, "http://localhost:3000/mcp");
+                        }
+                        _ => panic!("expected Http"),
+                    }
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn parse_env_mcp_servers_json_default_name() {
+        with_env_var("MCP_SERVER_COMMAND", None::<&str>, || {
+            with_env_var(
+                "MCP_SERVERS",
+                Some(r#"[{"command":"echo","args":["hello"]}]"#),
+                || {
+                    let result = parse_env_config();
+                    assert_eq!(result.len(), 1);
+                    // name 缺失时使用默认值
+                    assert_eq!(result[0].0, "mcp-server");
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn parse_env_mcp_servers_skips_missing_command_url() {
+        with_env_var("MCP_SERVER_COMMAND", None::<&str>, || {
+            with_env_var(
+                "MCP_SERVERS",
+                Some(r#"[
+                    {"name":"valid","command":"echo","args":["ok"]},
+                    {"name":"bad","args":[]}
+                ]"#),
+                || {
+                    let result = parse_env_config();
+                    // valid 应通过, bad 应被跳过
+                    assert_eq!(result.len(), 1);
+                    assert_eq!(result[0].0, "valid");
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn parse_env_mcp_servers_invalid_json_falls_back() {
+        with_env_var("MCP_SERVER_COMMAND", Some("echo hello"), || {
+            with_env_var("MCP_SERVERS", Some("not json at all"), || {
+                let result = parse_env_config();
+                // MCP_SERVERS 解析失败 → 回退到 MCP_SERVER_COMMAND
+                assert_eq!(result.len(), 1);
+                assert_eq!(result[0].0, "mcp-env");
+            });
+        });
     }
 }

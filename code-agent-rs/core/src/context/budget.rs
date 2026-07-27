@@ -190,8 +190,7 @@ pub struct TokenBudgetAllocator {
 impl TokenBudgetAllocator {
     /// 使用默认配置创建分配器。
     pub fn new(total_budget: usize) -> Self {
-        let mut config = TokenBudgetConfig::default();
-        config.total_budget = total_budget;
+        let config = TokenBudgetConfig { total_budget, ..Default::default() };
         Self {
             config,
             allocated: HashMap::new(),

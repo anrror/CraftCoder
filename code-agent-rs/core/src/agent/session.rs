@@ -128,6 +128,8 @@ pub struct SessionConfig {
     /// 最大上下文 Token 数量（Phase C Token 预算控制）。
     /// 当设置后，Session 将使用自定义 ContextConfig 而非默认值。
     pub max_context_tokens: Option<usize>,
+    /// 模型采样温度（None 表示使用模型客户端默认值）。
+    pub temperature: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +165,7 @@ pub struct SessionConfigBuilder {
     tool_registry: Option<Arc<dyn ToolRegistry>>,
     external_cancel: Option<Arc<AtomicBool>>,
     max_context_tokens: Option<usize>,
+    temperature: Option<f32>,
 }
 
 impl SessionConfigBuilder {
@@ -213,6 +216,12 @@ impl SessionConfigBuilder {
         self.max_context_tokens = Some(tokens);
         self
     }
+
+    /// Set the model sampling temperature.
+    pub fn temperature(mut self, t: f32) -> Self {
+        self.temperature = Some(t);
+        self
+    }
 }
 
 impl SessionConfigBuilder {
@@ -237,6 +246,7 @@ impl SessionConfigBuilder {
                 .expect("SessionConfigBuilder: `tool_registry` is required"),
             external_cancel: self.external_cancel,
             max_context_tokens: self.max_context_tokens,
+            temperature: self.temperature,
         }
     }
 }
@@ -436,6 +446,7 @@ impl Session {
                 tool_registry: tr,
                 external_cancel: None,
                 max_context_tokens: None,
+                temperature: None,
             },
             context_manager,
             state: SessionState {
@@ -753,7 +764,7 @@ impl SessionStep for ModelInvocationStep {
 
         match session
             .model_client
-            .complete_stream(&messages, &tool_defs)
+            .complete_stream(&messages, &tool_defs, session.config.temperature)
             .await
         {
             Ok(s) => {
@@ -993,7 +1004,7 @@ impl SessionStep for PersistenceStep {
             let turn_snap = TurnSnapshot {
                 turn_id: ctx.turn_id.clone(),
                 thread_id: ctx.thread_id.clone(),
-                turn_number: session.turn_counter as u64 - 1,
+                turn_number: session.turn_counter - 1,
                 events: ctx.events.clone(),
                 tool_calls: vec![],
                 created_at: Utc::now(),
@@ -1007,6 +1018,7 @@ impl SessionStep for PersistenceStep {
                 system_instructions: session.config.system_instructions.clone(),
                 max_iterations: session.config.max_iterations,
                 turn_count: session.state.turn_count,
+                user_id: String::new(),
                 messages: vec![],
                 turns: vec![],
                 created_at: Utc::now(),
@@ -1124,6 +1136,7 @@ pub(crate) mod tests {
             &self,
             _messages: &[Message],
             _tools: &[ToolDefinition],
+            _temperature: Option<f32>,
         ) -> ModelResult<Box<dyn stream::Stream<Item = ResponseEvent> + Send + Unpin>> {
             let mut responses = self.responses.lock().unwrap();
 
@@ -1209,6 +1222,7 @@ pub(crate) mod tests {
             tool_registry: Arc::new(DefaultToolRegistry::new()),
             external_cancel: None,
             max_context_tokens: None,
+            temperature: None,
         }
     }
 

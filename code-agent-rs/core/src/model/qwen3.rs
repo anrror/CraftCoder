@@ -452,6 +452,7 @@ impl ModelClient for Qwen3OpenAIClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>> {
         let request = ChatCompletionRequest {
             model: self.config.model.clone(),
@@ -462,7 +463,7 @@ impl ModelClient for Qwen3OpenAIClient {
                 Some(convert_tools(tools))
             },
             stream: self.config.stream,
-            temperature: self.config.temperature,
+            temperature: temperature.unwrap_or(self.config.temperature),
             max_tokens: self.config.max_tokens,
         };
 
@@ -482,6 +483,7 @@ impl ModelClient for Qwen3OpenAIClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<String> {
         // Non-streaming optimization: use stream=false for a single response
         let request = ChatCompletionRequest {
@@ -493,7 +495,7 @@ impl ModelClient for Qwen3OpenAIClient {
                 Some(convert_tools(tools))
             },
             stream: false,
-            temperature: self.config.temperature,
+            temperature: temperature.unwrap_or(self.config.temperature),
             max_tokens: self.config.max_tokens,
         };
 
@@ -597,7 +599,7 @@ mod tests {
         let tools = vec![];
 
         let mut stream = client
-            .complete_stream(&messages, &tools)
+            .complete_stream(&messages, &tools, None)
             .await
             .expect("stream");
         let mut texts: Vec<String> = Vec::new();
@@ -651,7 +653,7 @@ mod tests {
         )];
 
         let mut stream = client
-            .complete_stream(&messages, &tools)
+            .complete_stream(&messages, &tools, None)
             .await
             .expect("stream");
         let mut tool_calls: Vec<code_agent_protocol::ToolCall> = Vec::new();
@@ -700,7 +702,7 @@ mod tests {
         let messages = vec![Message::UserMessage {
             content: "hi".into(),
         }];
-        let result = client.complete_stream(&messages, &[]).await;
+        let result = client.complete_stream(&messages, &[], None).await;
         // 429 is retryable, but all retries will hit the same mock -> fail
         assert!(result.is_err());
         // Retry count should be > 0
@@ -729,7 +731,7 @@ mod tests {
         let messages = vec![Message::UserMessage {
             content: "hi".into(),
         }];
-        let result = client.complete_stream(&messages, &[]).await;
+        let result = client.complete_stream(&messages, &[], None).await;
         assert!(result.is_ok());
         mock.assert();
     }
@@ -761,7 +763,7 @@ mod tests {
             content: "test".into(),
         }];
         let mut stream = client
-            .complete_stream(&messages, &[])
+            .complete_stream(&messages, &[], None)
             .await
             .expect("stream");
         while let Some(_) = stream.next().await {}
@@ -805,7 +807,7 @@ mod tests {
         let messages = vec![Message::UserMessage {
             content: "2+2".into(),
         }];
-        let result = client.complete(&messages, &[]).await.expect("complete");
+        let result = client.complete(&messages, &[], None).await.expect("complete");
         assert_eq!(result, "The answer is 42.");
 
         let usage = client.last_token_usage().expect("usage tracked");
@@ -833,7 +835,7 @@ mod tests {
         let messages = vec![Message::UserMessage {
             content: "hi".into(),
         }];
-        let result = client.complete_stream(&messages, &[]).await;
+        let result = client.complete_stream(&messages, &[], None).await;
         assert!(result.is_err());
         match result {
             Err(ModelError::Api { status, .. }) => assert_eq!(status, 400),
@@ -881,7 +883,7 @@ mod tests {
         let messages = vec![Message::UserMessage {
             content: "hi".into(),
         }];
-        let result = client.complete_stream(&messages, &[]).await;
+        let result = client.complete_stream(&messages, &[], None).await;
         assert!(result.is_ok());
         mock.assert();
     }
@@ -910,7 +912,7 @@ mod tests {
             content: "hi".into(),
         }];
         let mut stream = client
-            .complete_stream(&messages, &[])
+            .complete_stream(&messages, &[], None)
             .await
             .expect("stream");
         let mut content_events = 0;
@@ -958,7 +960,7 @@ mod tests {
         )];
 
         let mut stream = client
-            .complete_stream(&messages, &tools)
+            .complete_stream(&messages, &tools, None)
             .await
             .expect("stream");
         let mut tool_events = 0;
@@ -996,7 +998,7 @@ mod tests {
         let messages = vec![Message::UserMessage {
             content: "hi".into(),
         }];
-        let result = client.complete_stream(&messages, &[]).await;
+        let result = client.complete_stream(&messages, &[], None).await;
         assert!(
             result.is_err(),
             "Expected connection error"
@@ -1028,7 +1030,7 @@ mod tests {
             content: "hi".into(),
         }];
         let mut stream = client
-            .complete_stream(&messages, &[])
+            .complete_stream(&messages, &[], None)
             .await
             .expect("stream");
         let mut texts: Vec<String> = Vec::new();
@@ -1084,7 +1086,7 @@ mod tests {
         )];
 
         let mut stream = client
-            .complete_stream(&messages, &tools)
+            .complete_stream(&messages, &tools, None)
             .await
             .expect("stream");
         let mut events: Vec<ResponseEvent> = Vec::new();

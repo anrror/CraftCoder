@@ -70,7 +70,14 @@ impl Tool for EditFileTool {
         let old_string = require_string(&params, "old_string")?;
         let new_string = require_string(&params, "new_string")?;
 
-        let content = std::fs::read_to_string(&path).map_err(|e| {
+        let canonical_path = crate::tools::resolve_safe_path(&path)?;
+
+        // M4: TOCTOU guard — snapshot file metadata before reading
+        let file_len_before = std::fs::metadata(&canonical_path)
+            .map_err(ToolError::Io)?
+            .len();
+
+        let content = std::fs::read_to_string(&canonical_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ToolError::execution_error(format!("file not found: {path}"))
             } else {
@@ -94,7 +101,16 @@ impl Tool for EditFileTool {
                     &content[..pos],
                     &content[pos + old_string.len()..]
                 );
-                std::fs::write(&path, &new_content)?;
+                // M4: TOCTOU guard — verify file unchanged between read and write
+                let file_len_now = std::fs::metadata(&canonical_path)
+                    .map_err(ToolError::Io)?
+                    .len();
+                if file_len_before != file_len_now {
+                    return Err(ToolError::execution_error(format!(
+                        "File {path} was modified by another process; please retry"
+                    )));
+                }
+                std::fs::write(&canonical_path, &new_content)?;
                 Ok(tool_success(
                     "",
                     format!(

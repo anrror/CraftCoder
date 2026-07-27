@@ -234,7 +234,7 @@ impl PlanExecutor {
     pub async fn execute(&self, plan: &mut TaskPlan) -> Result<ExecutionReport, PlanError> {
         // Step 1: 验证计划
         plan.validate()
-            .map_err(|e| PlanError::Validation(e))?;
+            .map_err(PlanError::Validation)?;
 
         info!(
             plan = %plan.name,
@@ -737,7 +737,7 @@ impl PlanExecutor {
                 None => (None, None, node.gate_verdict.as_ref().map(|v| format!("{:?}", v))),
             };
             // If a gate verdict exists and is not Pass, prefer that over actual error
-            let gate_verdict_str = if node.gate_verdict.as_ref().map_or(false, |v| !v.is_pass()) {
+            let gate_verdict_str = if node.gate_verdict.as_ref().is_some_and(|v| !v.is_pass()) {
                 node.gate_verdict.as_ref().map(|v| format!("{:?}", v))
             } else {
                 gate_str
@@ -805,6 +805,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[crate::model::types::ToolDefinition],
+            _temperature: Option<f32>,
         ) -> crate::model::ModelResult<
             Box<dyn futures::Stream<Item = ResponseEvent> + Send + Unpin>,
         > {

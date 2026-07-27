@@ -1,0 +1,16 @@
+target/
+.git/
+.ai/
+.omo/
+.agents/
+.opencode/
+.craftcoder/
+.playwright-mcp/
+.vscode/
+.idea/
+*.md
+!README.md
+.DS_Store
+Thumbs.db
+*.log
+node_modules/

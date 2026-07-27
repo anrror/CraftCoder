@@ -65,6 +65,7 @@ impl ModelClient for MockModelClient {
         &self,
         _messages: &[Message],
         _tools: &[ToolDefinition],
+        _temperature: Option<f32>,
     ) -> ModelResult<Box<dyn stream::Stream<Item = ResponseEvent> + Send + Unpin>> {
         let mut responses = self.responses.lock().unwrap();
         let events = if responses.is_empty() {
@@ -173,6 +174,7 @@ fn make_config(
         tool_registry: Arc::new(registry),
         external_cancel: None,
         max_context_tokens: None,
+        temperature: None,
     }
 }
 

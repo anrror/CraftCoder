@@ -148,7 +148,7 @@ impl ManualDecomposer {
         for phase in &self.phases {
             plan.add_phase(phase);
         }
-        plan.validate().map_err(|e| DecompositionError::Validation(e))?;
+        plan.validate().map_err(DecompositionError::Validation)?;
         Ok(plan)
     }
 }
@@ -362,7 +362,7 @@ Return a JSON object with this exact structure:
 
         // Validate the plan
         plan.validate()
-            .map_err(|e| DecompositionError::Validation(e))?;
+            .map_err(DecompositionError::Validation)?;
 
         Ok(plan)
     }
@@ -388,7 +388,7 @@ impl Decomposer for DecompositionEngine {
 
         let response = self
             .model
-            .complete(&messages, &[])
+            .complete(&messages, &[], None)
             .await
             .map_err(|e| DecompositionError::Model(e.to_string()))?;
 
@@ -496,7 +496,7 @@ mod tests {
     impl crate::model::ModelClient for NullModel {
         fn model_name(&self) -> &str { "null-model" }
         async fn complete_stream(
-            &self, _: &[code_agent_protocol::Message], _: &[crate::model::types::ToolDefinition],
+            &self, _: &[code_agent_protocol::Message], _: &[crate::model::types::ToolDefinition], _temperature: Option<f32>,
         ) -> crate::model::ModelResult<Box<dyn futures::Stream<Item = code_agent_protocol::ResponseEvent> + Send + Unpin>> {
             use futures::stream;
             Ok(Box::new(stream::empty()))

@@ -157,6 +157,7 @@ impl App {
     ///
     /// # 错误
     /// 如果终端设置失败（如不在终端中运行或无法进入备选屏幕）则返回 I/O 错误。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_tx: mpsc::UnboundedSender<String>,
         agent_rx: mpsc::UnboundedReceiver<AppEvent>,

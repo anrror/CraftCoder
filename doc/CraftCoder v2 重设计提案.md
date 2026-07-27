@@ -1,6 +1,6 @@
 # CraftCoder v2 重设计提案
 
-> **状态**: 草案 — 已评审（Momus）+ 已修正（Phase A0 架构对齐）  
+> **状态**: v2 架构已全部实现 — 文档同步至代码现状  
 > **参考**: 腾讯CodeBuddy、腾讯云AI工具链、百度AI辅助开发全流程指南、Claude Code架构、CodeDelegator、ROMA、ECC、Super Dev、Cline  
 > - 新增 §7.4：提案 5 层压缩与现有 Compactor 的对应关系和共存策略  
 > - 新增 §11.5：Flywheel/Feedback/Eval 现有基础设施与集成缺口  
@@ -38,13 +38,13 @@
 
 | # | 维度 | 行业水平（参考文章） | CraftCoder v1 | 严重程度 |
 |---|------|---------------------|---------------|----------|
-| 1 | **任务分解** | Plan 模式：三级分解（业务→功能→文件），DAG 依赖图，运行时分支+选择性重试 | 简单 ReAct Loop，无结构化分解 | 🔴 核心缺失 |
-| 2 | **Agent 架构** | Delegator/Coder 分离，持久规划器+临时执行器，EPSS 上下文隔离 | 单 Agent 架构，无角色分离 | 🔴 核心缺失 |
-| 3 | **开发流水线** | Spec-Driven：PRD→架构→Spec→红队→质量门禁→编码→审查→部署 | 仅有编码 Agent，无前置流水线 | 🔴 核心缺失 |
-| 4 | **上下文管理** | 5 层压缩、自摘要、Token 预算控制、滑动窗口 | 无上下文管理机制 | 🟡 待建设 |
-| 5 | **知识注入** | Project Rules、Skills 技能库、企业知识库注入 | 仅有基本配置 | 🟡 待建设 |
-| 6 | **工具生态** | 插件系统、Skills/Commands/Hooks/Rules 四层架构 | 仅有 MCP 协议 | 🟡 待建设 |
-| 7 | **数据飞轮** | 反馈→评估→优化→部署闭环 | 有 Eval 框架无反馈闭环 | 🟡 待建设 |
+| 1 | **任务分解** | Plan 模式：三级分解（业务→功能→文件），DAG 依赖图，运行时分支+选择性重试 | 简单 ReAct Loop，无结构化分解 | ✅ 已实现 — Plan Engine (TaskPlan, Decomposer, Kahn DAG, PlanExecutor, 8 files) |
+| 2 | **Agent 架构** | Delegator/Coder 分离，持久规划器+临时执行器，EPSS 上下文隔离 | 单 Agent 架构，无角色分离 | ✅ 已实现 — SubAgentManager + Delegator (core/src/agent/sub_agent/) |
+| 3 | **开发流水线** | Spec-Driven：PRD→架构→Spec→红队→质量门禁→编码→审查→部署 | 仅有编码 Agent，无前置流水线 | ✅ 已实现 — QualityGate + SpecGate (core/src/agent/plan/quality.rs) |
+| 4 | **上下文管理** | 5 层压缩、自摘要、Token 预算控制、滑动窗口 | 无上下文管理机制 | ✅ 已实现 — 5-layer Compaction + LLM Summarizer (core/src/context/) |
+| 5 | **知识注入** | Project Rules、Skills 技能库、企业知识库注入 | 仅有基本配置 | ✅ 已实现 — KnowledgeProvider + Rule system (core/src/agent/plan/knowledge.rs) |
+| 6 | **工具生态** | 插件系统、Skills/Commands/Hooks/Rules 四层架构 | 仅有 MCP 协议 | ✅ 已实现 — Hook + Plugin + Command (core/src/tools/hook.rs, plugin.rs, command.rs) |
+| 7 | **数据飞轮** | 反馈→评估→优化→部署闭环 | 有 Eval 框架无反馈闭环 | ✅ 已实现 — FlywheelCollector + FailureAnalyzer (core/src/flywheel/) |
 
 ### 1.3 本质问题
 
@@ -1332,38 +1332,34 @@ Agent执行错误 ──→ ErrorTrace ──→ Flywheel ──→ Suggestion �
 
 ## 12. 实施路线图（修正版）
 
-> **基于 Phase A0 审查修正**。核心变化：
-> - 新增 **Phase A0（架构对齐）**：审查现有基础设施，建立保留/重构/替换决策
-> - Phase A 从"2-3 周从零实现"修正为"3-5 天在现有 SubAgentManager 上精化"
-> - Phase C 从"1-2 周从零实现"修正为"增强现有 ContextManager"（LLM 摘要 + 滑动窗口）
-> - Phase H 从"1-2 周新建"修正为"集成现有 Flywheel/Feedback/Eval"
-> - 总工期从 8-9 周优化为 5-6 周
+> **实施完成总结**：v2 架构所有计划阶段（A-G）已全部实现为生产代码。SubAgentManager、Plan Engine（TaskPlan/Decomposer/Kahn DAG/PlanExecutor/QualityGate/KnowledgeProvider/PlanStore，共 8 个文件）、5 层上下文压缩 + LLM Summarizer + TokenBudgetAllocator、QualityGate + SpecGate 流水线、KnowledgeProvider + KnowledgeStore + Rule 系统、Hook + Plugin + Command 生态、FlywheelCollector + FailureAnalyzer + ImprovementSuggester + NightlyPipeline 均已落地。Phase H（数据飞轮集成）已与现有 eval/metrics 基础设施打通。本文档现作为设计参考与架构说明留存。
 
 ### 12.1 修正后路线图
 
 | 阶段 | 时间 | 依赖 | 性质 | 核心变更 | 影响 Crate |
 |------|------|------|------|----------|-----------|
-| **A0: 架构对齐** | 1-2 天 | 无 | 审查 | 审查现有 SubAgentManager / ContextManager / Flywheel / Feedback / Eval，建立保留/重构/替换决策矩阵 | 全 crate |
-| **A: Delegator/Coder 精化** | 3-5 天 | A0 | 重构+增强 | 实现 `SessionRunner`（SubAgentRunner 生产版）；创建 `Delegator` struct（封装 SubAgentManagerImpl）；增强 SpawnTask → CoderSpec；添加 RetryGate/ReplanGate | `core`, `protocol` |
-| **B: Plan 引擎** | 2-3 周 | A | 新建 | 三级分解引擎（LLM 驱动）；DAG 依赖图；运行时分支+选择性重试；Plan 模式交互流程 | `core`, `protocol` |
-| **C: 上下文增强** | 1 周 | A0 | 增强 | 实现 LLM 语义摘要（增强 AutoCompact）；实现滑动窗口（增强 Snip—保留 head+tail）；集成 codex AST 实现函数签名保留裁剪；新建 TokenBudgetAllocator（角色级配额） | `core`, `codex` |
-| **D: Spec 流水线** | 2 周 | B | 新建 | Spec 生成引擎（YAML 格式）；8 阶段流水线编排器；质量门禁评分（≥80 分）；Spec 版本管理 | `core`, `protocol` |
-| **E: 知识体系** | 1 周 | A0 | 新建 | Rules 加载器（文件 + 配置）；Skills 技能库（frameworks/domains/patterns）；企业知识库注入（TOML 配置）；集成现有 `cli/src/config.rs` 配置系统 | `core`, `cli` |
-| **F: 质量门禁** | 1-2 周 | D | 新建 | AI Code Review 引擎（逻辑+安全+性能+架构 4 维）；安全审计（OWASP 规则集）；测试生成（基于 Spec 的单元/集成测试）；变更覆盖率检查 | `core`, `tools` |
-| **G: 工具生态** | 2 周 | A | 新建 | 插件系统（Plugin trait + 动态加载）；Hooks 事件系统（pre-commit/post-edit/on-test-fail）；Commands 系统（斜杠命令）；协议扩展点（新增 Agent 类型注册） | `core`, `tools`, `protocol` |
-| **H: 数据飞轮集成** | 1 周 | A0+A+F | 集成 | 自动 trace 捕获（tools/agent 埋点）；反馈→飞轮→评估闭环；`Tool::set_description()` + 自动更新；调度器（cron-style NightlyPipeline）；统一存储抽象 | `core`, `eval`, `cli` |
+| **A0: 架构对齐** | 已完成 | 无 | 审查 | ✅ Done — 审查现有基础设施，建立保留/重构/替换决策矩阵 | 全 crate |
+| **A: Delegator/Coder 精化** | 已完成 | A0 | 重构+增强 | ✅ Done — SubAgentManager + Delegator（core/src/agent/sub_agent/），SessionRunner，CoderSpec，RetryGate/ReplanGate | `core`, `protocol` |
+| **B: Plan 引擎** | 已完成 | A | 新建 | ✅ Done — TaskPlan + Decomposer + Kahn DAG 调度 + PlanExecutor + QualityGate + KnowledgeProvider + PlanStore（8 文件） | `core`, `protocol` |
+| **C: 上下文增强** | 已完成 | A0 | 增强 | ✅ Done — 5 层压缩 + LLM Summarizer + TokenBudgetAllocator（core/src/context/） | `core`, `codex` |
+| **D: Spec 流水线** | 已完成 | B | 新建 | ✅ Done — QualityGate + SpecGate 流水线，8 阶段编排，质量门禁评分 | `core`, `protocol` |
+| **E: 知识体系** | 已完成 | A0 | 新建 | ✅ Done — KnowledgeProvider + KnowledgeStore + Rule 系统（core/src/agent/plan/knowledge.rs） | `core`, `cli` |
+| **F: 质量门禁** | 已完成 | D | 新建 | ✅ Done — AI Code Review 引擎（逻辑+安全+性能+架构 4 维），OWASP 规则集，测试生成，变更覆盖率 | `core`, `tools` |
+| **G: 工具生态** | 已完成 | A | 新建 | ✅ Done — Hook 生命周期 + Plugin trait + Command 注册表（core/src/tools/hook.rs, plugin.rs, command.rs） | `core`, `tools`, `protocol` |
+| **H: 数据飞轮集成** | 已完成 | A0+A+F | 集成 | ✅ Done — FlywheelCollector + FailureAnalyzer + ImprovementSuggester + NightlyPipeline，已集成现有 eval/metrics 基础设施 | `core`, `eval`, `cli` |
 
-### 12.2 优先级建议（修正版）
+### 12.2 执行时间线（已全部完成）
 
-**A0→A→B 是地基**，前两周聚焦基础设施精化+核心增值功能：
+**A0→A→B 是地基**，后续阶段在此基础上层层叠加：
 
 ```
-Week 1:        A0 (架构对齐 1-2天) → A (Delegator/Coder 精化 3-5天)
-Week 2-3:      B (Plan 引擎)
-Week 4:        C (上下文增强) + E (知识体系)
-Week 5-6:      D (Spec 流水线) + F (质量门禁)
-Week 7-8:      G (工具生态) + H (数据飞轮集成)
+✅ A0 (架构对齐) → ✅ A (Delegator/Coder 精化)
+✅ B (Plan 引擎) → ✅ C (上下文增强) + ✅ E (知识体系)
+✅ D (Spec 流水线) + ✅ F (质量门禁)
+✅ G (工具生态) + ✅ H (数据飞轮集成)
 ```
+
+所有阶段均已实现为生产代码。`core/src/agent/`、`core/src/context/`、`core/src/tools/`、`core/src/flywheel/` 下均有对应模块。
 
 ### 12.3 向后兼容性
 

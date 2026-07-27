@@ -56,6 +56,10 @@ pub enum GitError {
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
+    /// Git 身份未配置 — 防止 CWE-290 身份伪造
+    #[error("Git identity not configured. Set git config user.name and user.email, or set CODE_AGENT_GIT_AUTHOR_NAME and CODE_AGENT_GIT_AUTHOR_EMAIL")]
+    IdentityNotConfigured,
+
     /// libgit2 级别的操作失败
     #[error("Git operation failed: {0}")]
     OperationFailed(String),

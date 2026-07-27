@@ -126,7 +126,7 @@ impl Tool for ShellTool {
                         .unwrap_or_else(|_| "failed to serialize output".to_string()),
                 ))
             }
-            Err(err) => Ok(tool_error("", &format!("Shell execution failed: {err}"))),
+            Err(err) => Ok(tool_error("", format!("Shell execution failed: {err}"))),
         }
     }
 }

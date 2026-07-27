@@ -696,7 +696,7 @@ impl CompactionLayer for AutoCompact {
         let semantic_summary = if let Some(ref summarizer) = self.summarizer {
             let conversation_text = to_summarize
                 .iter()
-                .map(|m| format_message_for_summary(m))
+                .map(format_message_for_summary)
                 .collect::<Vec<_>>()
                 .join("\n");
             summarizer.summarize(&conversation_text, &context.system_instructions)

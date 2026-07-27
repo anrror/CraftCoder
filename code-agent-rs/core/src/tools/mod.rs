@@ -24,13 +24,14 @@
 
 pub mod builtin;
 pub mod command;
+pub mod hook;
 pub mod permission;
 pub mod plugin;
 pub mod registry;
 pub mod router;
 
 use async_trait::async_trait;
-use code_agent_protocol::{CapabilityLevel, ToolCall, ToolResultMessage};
+use code_agent_protocol::{CapabilityLevel, ToolResultMessage};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -125,6 +126,15 @@ pub enum ToolError {
     /// 工具执行期间发生 I/O 错误
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// 解析后的路径位于工作区外部 —— 路径穿越攻击已阻止（CWE-22）
+    #[error("path outside workspace: {path} (workspace root: {workspace})")]
+    OutsideWorkspace {
+        /// 被拒绝的路径
+        path: std::path::PathBuf,
+        /// 配置的工作区根目录
+        workspace: std::path::PathBuf,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +170,69 @@ impl ToolError {
 
 // ---------------------------------------------------------------------------
 // Helpers
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Workspace boundary enforcement (CWE-22 mitigation)
+// ---------------------------------------------------------------------------
+
+// 线程局部的工作区根目录。当设置后，所有 `resolve_safe_path*` 调用
+// 将验证解析后的规范路径是否位于此工作区根目录内。
+//
+// 【安全语义】工作区根目录在设置时即被规范化（canonicalize），
+// 确保符号链接被解析，`..` 组件被展开。此后所有路径检查均基于
+// 前缀匹配，拒绝任何不属于此子树的操作。
+thread_local! {
+    static WORKSPACE_ROOT: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 设置用于路径穿越保护的工作区根目录
+///
+/// 提供的路径在存储前会被规范化（解析所有符号链接和 `..` 组件）。
+/// 一旦设置，所有 `resolve_safe_path` 和 `resolve_safe_path_create`
+/// 调用将要求解析后的路径位于此根目录内。
+///
+/// 调用时传入 `None` 可清除工作区边界检查（用于测试或无沙箱环境）。
+///
+/// # Errors
+/// 如果工作区根目录路径无法规范化，则返回 `ToolError::Io`。
+pub fn set_workspace_root(root: Option<std::path::PathBuf>) -> Result<(), ToolError> {
+    let canonical = match root {
+        Some(path) => Some(path.canonicalize().map_err(ToolError::Io)?),
+        None => None,
+    };
+    WORKSPACE_ROOT.with(|cell| {
+        cell.replace(canonical);
+    });
+    Ok(())
+}
+
+/// 返回当前配置的工作区根目录（规范化形式），如果未设置则返回 `None`
+pub fn workspace_root() -> Option<std::path::PathBuf> {
+    WORKSPACE_ROOT.with(|cell| cell.borrow().clone())
+}
+
+/// 检查解析后的路径是否在工作区根目录内
+///
+/// 如果未设置工作区根目录，此检查为无操作（允许所有路径）。
+/// 如果设置了工作区根目录，则要求 `resolved` 以该目录为前缀。
+fn check_workspace(resolved: &std::path::Path) -> Result<(), ToolError> {
+    WORKSPACE_ROOT.with(|cell| {
+        if let Some(ref root) = *cell.borrow() {
+            if !resolved.starts_with(root) {
+                return Err(ToolError::OutsideWorkspace {
+                    path: resolved.to_path_buf(),
+                    workspace: root.clone(),
+                });
+            }
+        }
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Message builders / argument extractors
 // ---------------------------------------------------------------------------
 
 /// 为成功工具执行构建 `ToolResultMessage`
@@ -200,70 +273,303 @@ pub fn optional_u64(params: &serde_json::Value, key: &str) -> Option<u64> {
     params.get(key).and_then(|v| v.as_u64())
 }
 
+/// 解析并验证路径 —— 防止路径穿越攻击（C2）。
+///
+/// 将提供的路径规范化为绝对路径。解析所有 `..`、`.` 和符号链接，
+/// 防止 `../../../etc/passwd` 类型的路径穿越漏洞。
+///
+/// # Arguments
+/// * `path_str` - 用户提供的文件路径字符串
+///
+/// # Errors
+/// - 如果路径不存在 ⇒ `ExecutionError`
+/// - 如果 I/O 错误 ⇒ `ToolError::Io`
+/// - 如果路径在工作区外 ⇒ `OutsideWorkspace`
+pub fn resolve_safe_path(path_str: &str) -> Result<std::path::PathBuf, ToolError> {
+    let path = std::path::Path::new(path_str);
+    let resolved = path.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ToolError::execution_error(format!("path not found: {path_str}"))
+        } else {
+            ToolError::Io(e)
+        }
+    })?;
+    check_workspace(&resolved)?;
+    Ok(resolved)
+}
+
+/// 解析写入操作的路径 —— 目标文件可能不存在。
+///
+/// 如果文件存在，直接规范化为绝对路径。如果文件不存在，则从最近存在的
+/// 祖先目录开始向上查找，将能找到的第一个存在的目录规范化，再拼接
+/// 后续不存在的路径组件，防止 `../` 路径穿越。
+///
+/// # Arguments
+/// * `path_str` - 用户提供的文件路径字符串
+///
+/// # Errors
+/// - 如果路径中没有存在的祖先目录 ⇒ `ExecutionError`
+/// - 如果 I/O 错误 ⇒ `ToolError::Io`
+/// - 如果路径在工作区外 ⇒ `OutsideWorkspace`
+pub fn resolve_safe_path_create(path_str: &str) -> Result<std::path::PathBuf, ToolError> {
+    let path = std::path::Path::new(path_str);
+
+    let resolved = if path.exists() {
+        path.canonicalize().map_err(ToolError::Io)?
+    } else {
+        // Walk up the parent chain to find the first existing ancestor
+        let mut components: Vec<std::ffi::OsString> = Vec::new();
+        let mut current = path;
+        let mut found = None;
+        while let Some(parent) = current.parent() {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            if parent.exists() {
+                let canonical_parent = parent.canonicalize().map_err(ToolError::Io)?;
+                let mut result = canonical_parent;
+                if let Some(tail) = current.file_name() {
+                    result.push(tail);
+                }
+                for comp in components.into_iter().rev() {
+                    result.push(comp);
+                }
+                found = Some(result);
+                break;
+            }
+            if let Some(component) = current.file_name() {
+                components.push(component.to_os_string());
+            }
+            current = parent;
+        }
+
+        match found {
+            Some(p) => p,
+            None => {
+                // Fallback: file name relative to CWD
+                let cwd = std::env::current_dir().map_err(ToolError::Io)?;
+                let cwd_canonical = cwd.canonicalize().map_err(ToolError::Io)?;
+                if let Some(name) = path.file_name() {
+                    cwd_canonical.join(name)
+                } else {
+                    return Err(ToolError::execution_error(format!(
+                        "cannot resolve path for writing: {path_str}"
+                    )));
+                }
+            }
+        }
+    };
+
+    check_workspace(&resolved)?;
+    Ok(resolved)
+}
+
 // ---------------------------------------------------------------------------
-// ToolHook — 工具生命周期钩子（Phase F）
+// ToolHook / ToolEvent — re-export from hook module (Phase F)
 // ---------------------------------------------------------------------------
 
-/// 工具生命周期事件。
-#[derive(Debug, Clone)]
-pub enum ToolEvent<'a> {
-    /// 工具即将执行（此时尚未执行）
-    PreExecute {
-        /// 原始工具调用
-        call: &'a ToolCall,
-        /// 匹配到的工具名称
-        tool_name: &'a str,
-    },
-    /// 工具执行完成
-    PostExecute {
-        /// 原始工具调用
-        call: &'a ToolCall,
-        /// 工具执行结果
-        result: &'a ToolResultMessage,
-        /// 执行耗时（毫秒）
-        duration_ms: u64,
-    },
+pub use hook::{ToolEvent, ToolHook, NoopHook, HookRegistry};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    /// 辅助函数：创建临时工作区并在其中设置一个文件，返回 TempDir 和文件路径
+    fn setup_workspace_with_file(name: &str) -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let file_path = dir.path().join(name);
+        let parent = file_path.parent().unwrap();
+        fs::create_dir_all(parent).expect("failed to create parent dir");
+        fs::File::create(&file_path)
+            .and_then(|mut f| f.write_all(b"test content"))
+            .expect("failed to write test file");
+        set_workspace_root(Some(dir.path().to_path_buf())).expect("failed to set workspace root");
+        (dir, file_path)
+    }
+
+    /// 清除工作区根目录，避免污染其他测试（线程隔离下可选，但保持卫生）
+    fn clear_workspace() {
+        let _ = set_workspace_root(None);
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_safe_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_within_workspace_passes() {
+        let (_dir, file_path) = setup_workspace_with_file("src/main.rs");
+        let result = resolve_safe_path(&file_path.to_string_lossy());
+        clear_workspace();
+        assert!(result.is_ok(), "path within workspace should resolve: {result:?}");
+    }
+
+    #[test]
+    fn resolve_outside_workspace_rejected() {
+        let (_dir, _file_path) = setup_workspace_with_file("src/main.rs");
+        // Try to resolve the system temp directory (guaranteed outside our temp workspace)
+        let outside = std::env::temp_dir();
+        let result = resolve_safe_path(&outside.to_string_lossy());
+        clear_workspace();
+        match result {
+            Err(ToolError::OutsideWorkspace { .. }) => {} // expected
+            other => panic!("expected OutsideWorkspace, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_dotdot_traversal_rejected() {
+        let (dir, _file_path) = setup_workspace_with_file("src/main.rs");
+
+        // Create a subdirectory with a file we can reference
+        let subdir = dir.path().join("sub");
+        fs::create_dir_all(&subdir).expect("failed to create subdir");
+        let inside_file = subdir.join("inside.txt");
+        fs::File::create(&inside_file)
+            .and_then(|mut f| f.write_all(b"inside"))
+            .expect("failed to write inside file");
+
+        // Try relative path with `..` to escape workspace:
+        // from "sub/inside.txt", use "../../.." to reach temp dir root, then outside
+        // We'll navigate to an existing directory outside the workspace
+        let outside = std::env::temp_dir();
+        // Build a path: <workspace>/sub/../../<outside>
+        let traversal = subdir.join("..").join("..").join(&outside);
+        let result = resolve_safe_path(&traversal.to_string_lossy());
+        clear_workspace();
+        match result {
+            Err(ToolError::OutsideWorkspace { .. }) => {} // expected
+            other => panic!("expected OutsideWorkspace for .. traversal, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_symlink_outside_workspace_rejected() {
+        let (dir, _file_path) = setup_workspace_with_file("src/main.rs");
+
+        // Create a symlink inside workspace pointing outside
+        let outside_target = std::env::temp_dir();
+        let symlink_path = dir.path().join("escape_link");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside_target, &symlink_path)
+                .expect("failed to create symlink");
+            let result = resolve_safe_path(&symlink_path.to_string_lossy());
+            clear_workspace();
+            match result {
+                Err(ToolError::OutsideWorkspace { .. }) => {} // expected
+                other => panic!("expected OutsideWorkspace for symlink escape, got: {other:?}"),
+            }
+        }
+        #[cfg(windows)]
+        {
+            // On Windows, symlink creation requires admin or Developer Mode.
+            // Attempt to create a junction or symlink; if it fails due to permissions,
+            // skip the test gracefully.
+            match std::os::windows::fs::symlink_dir(&outside_target, &symlink_path) {
+                Ok(()) => {
+                    let result = resolve_safe_path(&symlink_path.to_string_lossy());
+                    clear_workspace();
+                    match result {
+                        Err(ToolError::OutsideWorkspace { .. }) => {} // expected
+                        other => panic!(
+                            "expected OutsideWorkspace for symlink escape, got: {other:?}"
+                        ),
+                    }
+                }
+                Err(e) if e.raw_os_error() == Some(1314) => {
+                    // ERROR_PRIVILEGE_NOT_HELD — symlink creation not allowed
+                    clear_workspace();
+                    eprintln!("skipping symlink test: insufficient privileges ({e})");
+                }
+                Err(e) => {
+                    clear_workspace();
+                    panic!("unexpected error creating symlink: {e}");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_safe_path_create
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_create_within_workspace_passes() {
+        let (dir, _file_path) = setup_workspace_with_file("src/main.rs");
+        let new_file = dir.path().join("src").join("new_module.rs");
+        // File does not exist yet — typical write scenario
+        assert!(!new_file.exists());
+        let result = resolve_safe_path_create(&new_file.to_string_lossy());
+        clear_workspace();
+        assert!(result.is_ok(), "write path within workspace should resolve: {result:?}");
+    }
+
+    #[test]
+    fn resolve_create_outside_workspace_rejected() {
+        let (_dir, _file_path) = setup_workspace_with_file("src/main.rs");
+        let outside = std::env::temp_dir().join("should_not_create_this.txt");
+        let result = resolve_safe_path_create(&outside.to_string_lossy());
+        clear_workspace();
+        match result {
+            Err(ToolError::OutsideWorkspace { .. }) => {} // expected
+            other => panic!("expected OutsideWorkspace for write outside workspace, got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // set_workspace_root / workspace_root / no-root bypass
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn without_workspace_root_all_paths_allowed() {
+        // No workspace root set → boundary check is a no-op
+        let result = resolve_safe_path(&std::env::temp_dir().to_string_lossy());
+        // Should succeed or fail with NotFound, but NOT OutsideWorkspace
+        assert!(
+            !matches!(result, Err(ToolError::OutsideWorkspace { .. })),
+            "without workspace root, no path should be rejected as OutsideWorkspace"
+        );
+    }
+
+    #[test]
+    fn workspace_root_roundtrip() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let canonical = dir.path().canonicalize().expect("canonicalize failed");
+        set_workspace_root(Some(dir.path().to_path_buf())).expect("set_workspace_root failed");
+        let stored = workspace_root().expect("workspace_root should be Some");
+        assert_eq!(stored, canonical, "stored root should match canonical form");
+        // Clear
+        set_workspace_root(None).expect("clear failed");
+        assert!(workspace_root().is_none(), "workspace_root should be None after clear");
+    }
+
+    #[test]
+    fn resolve_create_dotdot_traversal_rejected() {
+        let (dir, _file_path) = setup_workspace_with_file("src/main.rs");
+
+        let subdir = dir.path().join("sub");
+        fs::create_dir_all(&subdir).expect("failed to create subdir");
+
+        let outside = std::env::temp_dir().join("should_not_create.txt");
+        // Build: workspace/sub/../../../outside_file
+        let traversal = subdir.join("..").join("..").join("..").join(&outside);
+        let result = resolve_safe_path_create(&traversal.to_string_lossy());
+        clear_workspace();
+        match result {
+            Err(ToolError::OutsideWorkspace { .. }) => {} // expected
+            other => panic!(
+                "expected OutsideWorkspace for .. traversal in create, got: {other:?}"
+            ),
+        }
+    }
 }
 
-/// 工具生命周期钩子。
-///
-/// 【领域含义】在 ToolRouter 执行工具调用前后触发，
-/// 用于日志记录、监控、审计、指标收集等横切关注点。
-///
-/// 【核心职责】在 `on_event` 中处理 `ToolEvent::PreExecute` 和 `ToolEvent::PostExecute`。
-///
-/// # 示例
-///
-/// ```rust,ignore
-/// use code_agent_core::tools::{ToolEvent, ToolHook};
-///
-/// struct LoggingHook;
-///
-/// impl ToolHook for LoggingHook {
-///     fn on_event(&self, event: &ToolEvent) {
-///         match event {
-///             ToolEvent::PreExecute { call, .. } => {
-///                 tracing::info!("Tool started: {}", call.name);
-///             }
-///             ToolEvent::PostExecute { call, result, duration_ms } => {
-///                 tracing::info!("Tool {} completed in {}ms", call.name, duration_ms);
-///             }
-///         }
-///     }
-/// }
-/// ```
-#[async_trait]
-pub trait ToolHook: Send + Sync {
-    /// 工具事件回调。
-    ///
-    /// 【领域含义】在工具执行的不同生命周期阶段被调用。
-    /// 【核心职责】根据事件类型执行相应的横切逻辑。
-    fn on_event(&self, event: &ToolEvent);
-}
-
-/// 空的钩子实现（什么也不做）。
-pub struct NoopHook;
-
-impl ToolHook for NoopHook {
-    fn on_event(&self, _event: &ToolEvent) {}
-}

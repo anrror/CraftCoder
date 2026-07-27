@@ -101,6 +101,7 @@ pub struct NightlyPipeline {
     config: PipelineConfig,
     /// 可选的建议应用回调（Phase G：数据飞轮闭环）。
     /// 每次生成建议后调用，用于将建议应用到 Knowledge/Tool 系统。
+    #[allow(clippy::type_complexity)]
     on_suggestion: Option<Arc<dyn Fn(&Suggestion) + Send + Sync>>,
 }
 

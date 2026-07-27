@@ -28,7 +28,10 @@ use std::time::Duration;
 use code_agent_core::agent::plan::{DecompositionEngine, KnowledgeConfig, PlanConfig, SpecConfig};
 use code_agent_core::agent::{Session, SessionConfigBuilder, SessionRunner};
 use code_agent_core::model::{create_model_client, ModelClient, ModelConfig, ProviderKind};
+use code_agent_core::tools::plugin::{McpConnectionConfig, McpPlugin, PluginLoadResult, PluginManager};
 use code_agent_core::tools::registry::{DefaultToolRegistry, ToolRegistry};
+use code_agent_tools::mcp::adapter::McpClientConnector;
+use crate::config::McpServerConfig;
 use code_agent_protocol::{
     Message, ResponseEvent, SessionId, ThreadId, TurnInput,
 };
@@ -330,13 +333,14 @@ impl ExecCli {
         ))
     }
 
-    /// Resolve the tool registry, registering built-in tools by default.
+    /// Resolve the tool registry, registering built-in tools and MCP plugins by default.
     fn resolve_tool_registry(&self) -> Arc<dyn ToolRegistry> {
         if let Some(ref reg) = self.tool_registry {
             return Arc::clone(reg);
         }
         let mut registry = DefaultToolRegistry::new();
         code_agent_tools::register_all_core_tools(&mut registry);
+        register_mcp_plugins_from_env(&mut registry);
 
         Arc::new(registry)
     }
@@ -346,7 +350,11 @@ impl ExecCli {
 ///
 /// Shared helper for exec mode and TUI mode to avoid repeating
 /// the tool registration boilerplate.
-pub fn create_default_tool_registry() -> DefaultToolRegistry {
+///
+/// `mcp_configs` — optional MCP server configurations from TOML config;
+/// these are registered in addition to any `MCP_SERVERS` / `MCP_SERVER_COMMAND`
+/// environment variable (env vars have higher priority).
+pub fn create_default_tool_registry(mcp_configs: &[McpServerConfig]) -> DefaultToolRegistry {
     let mut registry = DefaultToolRegistry::new();
 
     // ── Phase 0: 内置文件工具（canonical registration in tools crate）──
@@ -361,8 +369,13 @@ pub fn create_default_tool_registry() -> DefaultToolRegistry {
     // ── Phase 3: LSP 代码智能工具 ───────────────────────────────
     register_lsp_tools(&mut registry);
 
-    // ── Phase 4: MCP 远程工具 ───────────────────────────────────
-    register_mcp_tools_from_env(&mut registry);
+    // ── Phase 4: MCP 远程工具（通过 Plugin 系统）─────────────────
+    // 环境变量（MCP_SERVERS / MCP_SERVER_COMMAND）优先于 TOML 配置
+    register_mcp_plugins_from_env(&mut registry);
+    // TOML 配置文件中的 [mcp_servers] 节作为补充
+    if !mcp_configs.is_empty() {
+        register_mcp_plugins_from_configs(mcp_configs, &mut registry);
+    }
 
     registry
 }
@@ -411,56 +424,67 @@ fn register_lsp_tools(registry: &mut dyn ToolRegistry) {
     }
 }
 
-/// 从环境变量 `MCP_SERVER_COMMAND` 注册 MCP 远程工具。
-///
-/// 【领域含义】如果设置了 `MCP_SERVER_COMMAND` 环境变量，
-/// 将其解析为 `command args...` 格式，通过 stdio 连接到 MCP 服务器，
-/// 发现远程工具并注册到 ToolRegistry。
-///
-/// 【核心职责】解析环境变量 → 创建 McpRegistry → 连接 stdio → 注册适配器。
-/// 由于 MCP 操作是异步的，此函数通过 `tokio::runtime::Handle` 执行阻塞等待。
-fn register_mcp_tools_from_env(registry: &mut dyn ToolRegistry) {
-    let mcp_command = match std::env::var("MCP_SERVER_COMMAND") {
-        Ok(cmd) if !cmd.trim().is_empty() => cmd,
-        _ => return,
-    };
+/// 从环境变量注册 MCP 插件，委托给 `code_agent_tools::mcp::register_from_env`。
+fn register_mcp_plugins_from_env(registry: &mut dyn ToolRegistry) {
+    code_agent_tools::mcp::register_from_env(registry);
+}
 
-    // 按空白字符分割：第一个 token 是命令，其余是参数
-    let parts: Vec<&str> = mcp_command.split_whitespace().collect();
-    if parts.is_empty() {
-        return;
-    }
-    let command = parts[0];
-    let args = &parts[1..];
-
+/// 从一组 `McpServerConfig` 配置注册 MCP 插件。
+///
+/// 【领域含义】为每个有效的服务器配置创建 `McpPlugin` 实例，
+/// 通过 `PluginManager` 批量加载到 `ToolRegistry`。
+///
+/// 【核心职责】遍历配置 → 过滤无效 → 创建 McpPlugin → load_all。
+fn register_mcp_plugins_from_configs(configs: &[McpServerConfig], registry: &mut dyn ToolRegistry) {
     let rt = match tokio::runtime::Handle::try_current() {
         Ok(handle) => handle,
         Err(_) => {
-            tracing::warn!("Cannot register MCP tools: no tokio runtime available");
+            tracing::warn!("Cannot register MCP plugins: no tokio runtime available");
             return;
         }
     };
 
-    let result = rt.block_on(async {
-        let local_registry = Arc::new(DefaultToolRegistry::new());
-        let mut mcp_registry = code_agent_tools::mcp::McpRegistry::new(local_registry);
+    rt.block_on(async {
+        let mut pm = PluginManager::new();
 
-        if let Err(e) = mcp_registry
-            .connect_stdio("mcp", command, args)
-            .await
-        {
-            tracing::warn!(error = %e, command = %mcp_command, "Failed to connect to MCP server");
-            return;
+        for cfg in configs {
+            if !cfg.is_valid() {
+                tracing::warn!(
+                    name = ?cfg.name,
+                    "Skipping MCP server config: must set command or url"
+                );
+                continue;
+            }
+
+            let connector = McpClientConnector::new();
+            let name = cfg.display_name().to_string();
+            let connection_config = if let Some(ref cmd) = cfg.command {
+                McpConnectionConfig::Stdio {
+                    command: cmd.clone(),
+                    args: cfg.args.clone(),
+                }
+            } else if let Some(ref url) = cfg.url {
+                McpConnectionConfig::Http { url: url.clone() }
+            } else {
+                continue; // is_valid already checked, but satisfy exhaustiveness
+            };
+
+            let plugin = McpPlugin::new(name.clone(), name, connection_config, Box::new(connector));
+            pm.register(Box::new(plugin));
         }
 
-        let mcp_arc = Arc::new(mcp_registry);
-        if let Err(e) = crate::tools::mcp::register_mcp_tools(registry, &mcp_arc).await {
-            tracing::warn!(error = %e, "Failed to register MCP tools");
+        let results = pm.load_all(registry).await;
+        for result in &results {
+            match result {
+                PluginLoadResult::Success { name } => {
+                    tracing::info!(plugin = %name, "MCP plugin registered successfully");
+                }
+                PluginLoadResult::Failed { name, error } => {
+                    tracing::warn!(plugin = %name, error = %error, "MCP plugin failed to load");
+                }
+            }
         }
     });
-
-    // Suppress unused result warning — errors are logged above
-    let _ = result;
 }
 
 // =========================================================================

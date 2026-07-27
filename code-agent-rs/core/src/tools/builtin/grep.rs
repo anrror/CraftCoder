@@ -70,6 +70,8 @@ impl Tool for GrepTool {
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResultMessage, ToolError> {
         let pattern_str = require_string(&params, "pattern")?;
         let search_path = require_string(&params, "path").unwrap_or_else(|_| ".".to_string());
+        let canonical_path = crate::tools::resolve_safe_path(&search_path)?;
+        let search_path = canonical_path.to_string_lossy().to_string();
         let include_filter = optional_string(&params, "include");
 
         let regex = regex::Regex::new(&pattern_str).map_err(|e| {

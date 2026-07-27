@@ -83,7 +83,7 @@ impl Tool for GitStatusTool {
                         .unwrap_or_else(|_| "failed to serialize".to_string()),
                 ))
             }
-            Err(e) => Ok(tool_error("", &format!("git status failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("git status failed: {e}"))),
         }
     }
 }
@@ -152,7 +152,7 @@ impl Tool for GitDiffTool {
 
         match client.diff(cached) {
             Ok(diff) => Ok(tool_success("", diff)),
-            Err(e) => Ok(tool_error("", &format!("git diff failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("git diff failed: {e}"))),
         }
     }
 }
@@ -241,7 +241,7 @@ impl Tool for GitLogTool {
                         .unwrap_or_else(|_| "[]".to_string()),
                 ))
             }
-            Err(e) => Ok(tool_error("", &format!("git log failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("git log failed: {e}"))),
         }
     }
 }
@@ -333,12 +333,12 @@ impl Tool for GitCommitTool {
         if files.is_empty() {
             // add all (git add -A equivalent via adding "." catches everything)
             if let Err(e) = client.add(&["."]) {
-                return Ok(tool_error("", &format!("git add failed: {e}")));
+                return Ok(tool_error("", format!("git add failed: {e}")));
             }
         } else {
             let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
             if let Err(e) = client.add(&refs) {
-                return Ok(tool_error("", &format!("git add failed: {e}")));
+                return Ok(tool_error("", format!("git add failed: {e}")));
             }
         }
 
@@ -352,10 +352,10 @@ impl Tool for GitCommitTool {
                 Ok(tool_success(
                     "",
                     serde_json::to_string_pretty(&output)
-                        .unwrap_or_else(|_| hash),
+                        .unwrap_or(hash),
                 ))
             }
-            Err(e) => Ok(tool_error("", &format!("git commit failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("git commit failed: {e}"))),
         }
     }
 }

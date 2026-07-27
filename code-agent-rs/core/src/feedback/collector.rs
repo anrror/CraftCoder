@@ -14,7 +14,6 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Result as SqliteResult};
-use serde_json;
 use tracing::debug;
 
 use super::schema::initialize_feedback_schema;

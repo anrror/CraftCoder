@@ -10,4 +10,3 @@
 pub mod shell;
 pub mod git;
 pub mod lsp;
-pub mod mcp;

@@ -20,6 +20,7 @@
 
 use code_agent_core::agent::plan::knowledge::KnowledgeConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -69,6 +70,13 @@ impl Default for QualityConfig {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// McpServerConfig — MCP 服务器配置（类型定义移入 code-agent-tools crate）
+// ---------------------------------------------------------------------------
+
+// 重新导出 types crate 中的 McpServerConfig，兼容现有代码。
+pub use code_agent_tools::mcp::config::McpServerConfig;
 
 // ---------------------------------------------------------------------------
 // AgentConfig — 可选字段配置（配置层合并用）
@@ -122,6 +130,13 @@ pub struct AgentConfig {
 
     /// 知识模块配置（可选 TOML 扩展节 `[knowledge]`）
     pub knowledge: Option<KnowledgeConfig>,
+
+    /// MCP 服务器配置列表（可选 TOML 扩展节 `[mcp_servers]`）
+    ///
+    /// 键为服务器名称，值为连接配置（command/args 或 url）。
+    /// 也可以通过 `MCP_SERVERS` 环境变量（JSON 格式）配置。
+    #[serde(default)]
+    pub mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
 }
 
 /// 完整配置
@@ -171,6 +186,9 @@ pub struct Config {
 
     /// 知识模块配置
     pub knowledge: KnowledgeConfig,
+
+    /// MCP 服务器配置列表（来自 TOML 或环境变量）
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +212,7 @@ impl Default for Config {
             plan_enabled: false,
             quality: QualityConfig::default(),
             knowledge: KnowledgeConfig::default(),
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -235,6 +254,20 @@ impl AgentConfig {
                 .knowledge
                 .clone()
                 .unwrap_or(defaults.knowledge),
+            mcp_servers: self
+                .mcp_servers
+                .clone()
+                .map(|map| {
+                    map.into_iter()
+                        .map(|(key, mut cfg)| {
+                            if cfg.name.is_none() {
+                                cfg.name = Some(key);
+                            }
+                            cfg
+                        })
+                        .collect()
+                })
+                .unwrap_or(defaults.mcp_servers),
         }
     }
 }
@@ -430,6 +463,9 @@ impl ConfigBuilder {
         }
         if let Some(v) = &other.knowledge {
             self.inner.knowledge = Some(v.clone());
+        }
+        if let Some(v) = &other.mcp_servers {
+            self.inner.mcp_servers = Some(v.clone());
         }
         self
     }
@@ -772,5 +808,116 @@ mod tests {
         assert_eq!(parsed.timeout_secs, original.timeout_secs);
         assert_eq!(parsed.max_iterations, original.max_iterations);
         assert_eq!(parsed.tool_allowlist, original.tool_allowlist);
+    }
+
+    // ── MCP 服务器配置 ───────────────────────────────────────────
+
+    #[test]
+    fn mcp_servers_toml_parse_stdio() {
+        let toml_str = r#"
+            model = "mcp-test"
+
+            [mcp_servers.filesystem]
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+        "#;
+
+        let parsed: AgentConfig = toml::from_str(toml_str).unwrap();
+        let mcp = parsed.mcp_servers.as_ref().unwrap();
+        assert_eq!(mcp.len(), 1);
+
+        let fs = mcp.get("filesystem").unwrap();
+        assert_eq!(fs.command.as_deref(), Some("npx"));
+        assert_eq!(fs.args, vec!["-y", "@modelcontextprotocol/server-filesystem", "."]);
+        assert!(fs.url.is_none());
+        // TOML 层不自动设 name（finalize 阶段才从 key 填充）
+        assert!(fs.name.is_none());
+
+        // finalize 后 name 应从 TOML key 自动填充
+        let finalized = parsed.finalize();
+        assert_eq!(finalized.mcp_servers.len(), 1);
+        assert_eq!(finalized.mcp_servers[0].name.as_deref(), Some("filesystem"));
+    }
+
+    #[test]
+    fn mcp_servers_toml_parse_http() {
+        let toml_str = r#"
+            [mcp_servers.github]
+            url = "http://localhost:3000/mcp"
+        "#;
+
+        let parsed: AgentConfig = toml::from_str(toml_str).unwrap();
+        let mcp = parsed.mcp_servers.unwrap();
+        assert_eq!(mcp.len(), 1);
+
+        let gh = mcp.get("github").unwrap();
+        assert_eq!(gh.url.as_deref(), Some("http://localhost:3000/mcp"));
+        assert!(gh.command.is_none());
+    }
+
+    #[test]
+    fn mcp_servers_finalize_sets_name_from_key() {
+        let cfg = AgentConfig {
+            mcp_servers: Some(BTreeMap::from([
+                (
+                    "my-server".into(),
+                    McpServerConfig {
+                        name: None,
+                        command: Some("echo".into()),
+                        args: vec!["hello".into()],
+                        url: None,
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        let finalized = cfg.finalize();
+        assert_eq!(finalized.mcp_servers.len(), 1);
+        // finalize 应将 TOML key 设为 name
+        assert_eq!(finalized.mcp_servers[0].name.as_deref(), Some("my-server"));
+        assert_eq!(finalized.mcp_servers[0].command.as_deref(), Some("echo"));
+    }
+
+    #[test]
+    fn mcp_servers_merge_layers() {
+        let global = AgentConfig {
+            mcp_servers: Some(BTreeMap::from([
+                (
+                    "fs".into(),
+                    McpServerConfig {
+                        name: None,
+                        command: Some("npx".into()),
+                        args: vec!["server-fs".into()],
+                        url: None,
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        let project = AgentConfig {
+            mcp_servers: Some(BTreeMap::from([
+                (
+                    "github".into(),
+                    McpServerConfig {
+                        name: None,
+                        url: Some("http://localhost:3000/mcp".into()),
+                        command: None,
+                        args: vec![],
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        let config = ConfigBuilder::new()
+            .merge(&global)
+            .merge(&project)
+            .build();
+
+        // project 层替换 global 层（当前 merge 语义：后合并者完全覆盖）
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].display_name(), "github");
     }
 }

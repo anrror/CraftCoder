@@ -326,7 +326,7 @@ use code_agent_core::model::{create_model_client, ModelClient, ModelConfig, Prov
     };
 
     // Create tool registry with built-in tools
-    let tool_registry: Arc<dyn ToolRegistry> = Arc::new(create_default_tool_registry());
+    let tool_registry: Arc<dyn ToolRegistry> = Arc::new(create_default_tool_registry(&config.mcp_servers));
 
     // Create session
     let mut session = if let Some(ref resume_id) = resume {
@@ -456,10 +456,7 @@ use code_agent_core::model::{create_model_client, ModelClient, ModelConfig, Prov
             });
 
             // 5. Wait for user approval
-            let approved = match approval_rx.recv().await {
-                Some(true) => true,
-                _ => false,
-            };
+            let approved = matches!(approval_rx.recv().await, Some(true));
 
             if !approved {
                 let _ = plan_event_tx.send(code_agent_cli::tui::events::AppEvent::PlanCompleted {
@@ -470,18 +467,20 @@ use code_agent_core::model::{create_model_client, ModelClient, ModelConfig, Prov
             }
 
             // 6. Execute plan via SessionRunner
-            let mut plan_cfg = PlanConfig::default();
-            plan_cfg.gate_enabled = config.quality.gate_enabled;
-            plan_cfg.default_max_retries = config.quality.default_max_retries;
-            plan_cfg.spec_config = Some(SpecConfig {
-                require_no_error: config.quality.require_no_error,
-                require_events: config.quality.require_events,
-                require_final_message: config.quality.require_final_message,
-                require_spec: config.quality.require_spec,
-                auto_retry: config.quality.auto_retry,
-                retry_with_variant: config.quality.retry_with_variant,
+            let plan_cfg = PlanConfig {
+                gate_enabled: config.quality.gate_enabled,
+                default_max_retries: config.quality.default_max_retries,
+                spec_config: Some(SpecConfig {
+                    require_no_error: config.quality.require_no_error,
+                    require_events: config.quality.require_events,
+                    require_final_message: config.quality.require_final_message,
+                    require_spec: config.quality.require_spec,
+                    auto_retry: config.quality.auto_retry,
+                    retry_with_variant: config.quality.retry_with_variant,
+                    ..Default::default()
+                }),
                 ..Default::default()
-            });
+            };
 
             let mut runner = SessionRunner::new(plan_model.clone(), plan_tool_registry.clone())
                 .with_plan_config(plan_cfg);
@@ -634,7 +633,7 @@ async fn cmd_app_server(config: Config) -> i32 {
     };
 
     // Create tool registry with built-in tools
-    let tool_registry: Arc<dyn ToolRegistry> = Arc::new(create_default_tool_registry());
+    let tool_registry: Arc<dyn ToolRegistry> = Arc::new(create_default_tool_registry(&config.mcp_servers));
 
     let mut server = AppServer::new()
         .with_model_client(model_client)

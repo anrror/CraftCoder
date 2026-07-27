@@ -13,7 +13,7 @@ use rusqlite::{Connection, Result as SqliteResult};
 /// Create all tables and indexes if they do not already exist.
 ///
 /// Idempotent -- safe to call on every application startup.
-
+///
 ///                                 ?   --                            
 ///
 ///                                                                        ?
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     system_instructions TEXT NOT NULL DEFAULT '',
     max_iterations  INTEGER NOT NULL DEFAULT 20,
     turn_count      INTEGER NOT NULL DEFAULT 0,
+    user_id         TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );

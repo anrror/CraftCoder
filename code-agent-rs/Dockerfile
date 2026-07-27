@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ============================================================
-# Code Agent — 多阶段 Rust 构建镜像
+# Code Agent — 多阶段构建镜像 (Rust + React SPA)
 # ============================================================
 # 构建用法:
 #   docker build -t code-agent:latest -f code-agent-rs/Dockerfile code-agent-rs
@@ -14,7 +14,21 @@
 #   app-server — code-agent-app-server (JSON-RPC over stdio)
 # ============================================================
 
-# ── Stage 1: Builder ────────────────────────────────────────
+# ── Stage 1: Frontend Builder (React SPA) ──────────────────
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /build
+
+# 缓存层: 先复制依赖清单
+COPY code-agent-web/ui/package.json code-agent-web/ui/package-lock.json ./ui/
+RUN cd ui && npm ci
+
+# 复制源码并构建
+COPY code-agent-web/ui/ ./ui/
+RUN cd ui && npm run build
+# vite.config.ts 配置 outDir: '../static'，产物在 /build/static/
+
+# ── Stage 2: Rust Builder ──────────────────────────────────
 FROM rust:1.80-slim-bookworm AS builder
 
 # 系统依赖: libsqlite3 用于 rusqlite(system=bundled 不需要)，但保留 git/ssl 用于 cargo
@@ -57,9 +71,10 @@ COPY tools/src tools/src/
 COPY codex/src codex/src/
 COPY eval/src eval/src/
 COPY cli/src cli/src/
-COPY app-server src app-server/src/
+COPY app-server/src app-server/src/
 COPY code-agent-web/src code-agent-web/src/
-COPY code-agent-web/static code-agent-web/static/
+# 复制前端构建产物（从 frontend-builder stage 而非 host）
+COPY --from=frontend-builder /build/static code-agent-web/static/
 COPY eval-runner/src eval-runner/src/
 
 # 完整构建

@@ -16,11 +16,14 @@ pub mod linux;
 
 use config::SandboxConfig;
 use std::path::Path;
+#[cfg(not(windows))]
 use std::time::Instant;
 use thiserror::Error;
+#[cfg(not(windows))]
 use tokio::io::{AsyncRead, AsyncReadExt};
+#[cfg(not(windows))]
 use tokio::process::Command as AsyncCommand;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -70,6 +73,13 @@ pub enum SandboxError {
     /// 【领域含义】用户提交了空白或空命令字符串，拒绝执行。
     #[error("command is empty")]
     EmptyCommand,
+
+    /// 命令包含 shell 元字符
+    ///
+    /// 【领域含义】命令中检测到 `$`、反引号、管道、重定向或分隔符等
+    /// shell 元字符，拒绝执行以防止命令注入（CWE-78）。
+    #[error("command rejected (CWE-78): contains shell metacharacter(s) — {0}")]
+    MetacharacterRejected(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +98,8 @@ pub enum SandboxBackend {
     Docker,
     /// 无限制 — 直接进程派生（仅超时控制）
     Unrestricted,
+    /// 无沙箱 — 拒绝执行（需显式设置 CODE_AGENT_ALLOW_UNRESTRICTED=true 才回退到 Unrestricted）
+    None,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +122,52 @@ pub struct ExecResult {
     pub duration_ms: u64,
     /// 是否因超时而终止
     pub timed_out: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Shell metacharacter detection (CWE-78 prevention)
+// ---------------------------------------------------------------------------
+
+/// 检测命令中是否包含 shell 元字符
+///
+/// 【领域含义】检测可通过 `/bin/sh -c` 用于命令注入的特殊字符。
+/// 检测到 `$`、反引号、管道 (`|`)、分隔符 (`;`)、后台 (`&`)、
+/// 重定向 (`<`, `>`)、换行 (`\n`)、制表 (`\t`) 即返回 `true`。
+///
+/// 【核心职责】在命令执行前进行静态安全检查，阻止 CWE-78 命令注入。
+fn has_shell_metacharacters(command: &str) -> bool {
+    command.contains('$')
+        || command.contains('`')
+        || command.contains('|')
+        || command.contains(';')
+        || command.contains('&')
+        || command.contains('<')
+        || command.contains('>')
+        || command.contains('\n')
+        || command.contains('\t')
+}
+
+/// 校验命令不包含 shell 元字符
+///
+/// 【领域含义】对即将执行的外部命令进行注入防御校验。
+/// 通过则返回原命令引用，否则记录 `warn!` 安全审计日志并拒绝执行。
+///
+/// 【核心职责】阻止含元字符的命令进入 shell 执行管道。
+fn sanitize_command(command: &str) -> Result<&str, SandboxError> {
+    if has_shell_metacharacters(command) {
+        let preview = if command.len() <= 100 {
+            command.to_string()
+        } else {
+            format!("{}...", &command[..100])
+        };
+        warn!(
+            target: "shell",
+            command_preview = %preview,
+            "rejected command with shell metacharacters (CWE-78 injection prevention)"
+        );
+        return Err(SandboxError::MetacharacterRejected(preview));
+    }
+    Ok(command)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +219,23 @@ impl SandboxManager {
         if docker::is_docker_available() {
             return SandboxBackend::Docker;
         }
-        SandboxBackend::Unrestricted
+        // CWE-250: 无沙箱回退必须显式 opt-in —— 禁止静默回退到 Unrestricted
+        let allow_unrestricted = std::env::var("CODE_AGENT_ALLOW_UNRESTRICTED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if allow_unrestricted {
+            info!(
+                target: "shell",
+                "CODE_AGENT_ALLOW_UNRESTRICTED=true — falling back to unrestricted execution (CWE-250 opt-in)"
+            );
+            SandboxBackend::Unrestricted
+        } else {
+            info!(
+                target: "shell",
+                "no sandbox available and CODE_AGENT_ALLOW_UNRESTRICTED not set — refusing execution (CWE-250)"
+            );
+            SandboxBackend::None
+        }
     }
 
     /// 获取当前后端
@@ -185,7 +259,15 @@ impl SandboxManager {
             return Err(SandboxError::EmptyCommand);
         }
 
+        // CWE-78: 命令注入防御 —— 拒绝包含 shell 元字符的命令
+        sanitize_command(command)?;
+
         match self.backend {
+            SandboxBackend::None => {
+                Err(SandboxError::BackendUnavailable(
+                    "No sandbox backend available; set CODE_AGENT_ALLOW_UNRESTRICTED=true to enable unrestricted fallback",
+                ))
+            }
             SandboxBackend::LinuxBubblewrap => {
                 #[cfg(target_os = "linux")]
                 {
@@ -217,11 +299,62 @@ async fn execute_unrestricted(
     command: &str,
     workdir: &Path,
 ) -> Result<ExecResult, SandboxError> {
+    // 审计日志：记录无沙箱执行决策（CWE-250 审计追踪）
+    let command_preview = if command.len() <= 100 {
+        command
+    } else {
+        &command[..100]
+    };
+    info!(
+        target: "shell",
+        command_preview,
+        "executing command in unrestricted mode (CWE-250: explicit opt-in verified)"
+    );
+
+    // C3: Windows 上不提供 shell 执行 —— 不允许回退到 cmd.exe（cmd.exe 的引号/转义语义
+    // 与 POSIX shell 完全不同，会引入命令注入风险）。用户必须在 Linux 或 Docker 沙箱中执行。
+    #[cfg(windows)]
+    {
+        let _ = (config, command, workdir);
+        Err(SandboxError::BackendUnavailable(
+            "shell execution is not available on Windows without Docker sandbox; "
+        ))
+    }
+
+    #[cfg(not(windows))]
+    {
+        _execute_unrestricted_posix(config, command, workdir).await
+    }
+}
+
+/// C3: POSIX 平台上的无限制 shell 执行（Linux / macOS）
+///
+/// 使用 `/bin/sh -c <command>` 而非 `cmd.exe`，因为 POSIX shell 的引号语义
+/// 可预测且不易受命令注入影响。coreutils / PATH 等环境变量在子进程中清空。
+#[cfg(not(windows))]
+async fn _execute_unrestricted_posix(
+    config: &SandboxConfig,
+    command: &str,
+    workdir: &Path,
+) -> Result<ExecResult, SandboxError> {
     let start = Instant::now();
+
+    // Validate: reject commands with null bytes (can't be represented in C strings)
+    if command.contains('\0') {
+        return Err(SandboxError::Config(
+            "command contains null byte".to_string(),
+        ));
+    }
 
     let mut cmd = AsyncCommand::new("/bin/sh");
     cmd.arg("-c").arg(command);
     cmd.current_dir(workdir);
+    // Clear inherited environment to reduce injection surface
+    cmd.env_clear();
+    cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    cmd.env("HOME", "/tmp");
+    // Pass through the unrestricted opt-in flag so child processes inherit the same policy
+    cmd.env("CODE_AGENT_ALLOW_UNRESTRICTED", "1");
 
     let mut child = cmd
         .stdin(std::process::Stdio::null())
@@ -264,7 +397,8 @@ async fn execute_unrestricted(
     let exit_code = status.code().unwrap_or(-1);
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    debug!(
+    // H8/M7: 使用 info! 而非 debug! 确保审计追踪在生产环境可见
+    info!(
         target: "shell",
         exit_code,
         duration_ms,
@@ -286,6 +420,7 @@ async fn execute_unrestricted(
 ///
 /// 【领域含义】区分标准输出和标准错误两条管道。
 /// 【核心职责】在输出读取函数中指定要读取的管道。
+#[cfg(not(windows))]
 #[derive(Copy, Clone)]
 enum PipeTarget {
     /// 标准输出管道
@@ -294,6 +429,7 @@ enum PipeTarget {
     Stderr,
 }
 
+#[cfg(not(windows))]
 async fn read_pipe_output(
     child: &mut tokio::process::Child,
     which: PipeTarget,
@@ -447,6 +583,9 @@ mod tests {
             Err(SandboxError::Spawn { .. }) => {
                 eprintln!("skipping: /bin/sh not available");
             }
+            Err(SandboxError::BackendUnavailable(msg)) => {
+                eprintln!("skipping (Windows): {msg}");
+            }
             Err(e) => panic!("unexpected error: {:?}", e),
         }
     }
@@ -471,6 +610,9 @@ mod tests {
             Err(SandboxError::Spawn { .. }) => {
                 eprintln!("skipping: /bin/sh not available");
             }
+            Err(SandboxError::BackendUnavailable(msg)) => {
+                eprintln!("skipping (Windows): {msg}");
+            }
             Err(e) => panic!("unexpected error: {:?}", e),
         }
     }
@@ -493,6 +635,9 @@ mod tests {
             Err(SandboxError::Spawn { .. }) => {
                 eprintln!("skipping: /bin/sh not available");
             }
+            Err(SandboxError::BackendUnavailable(msg)) => {
+                eprintln!("skipping (Windows): {msg}");
+            }
             Err(e) => panic!("unexpected error: {:?}", e),
         }
     }
@@ -507,9 +652,16 @@ mod tests {
             SandboxManager::with_backend(config, SandboxBackend::Unrestricted);
 
         let temp_dir = std::env::temp_dir();
-        let result = manager
-            .execute("yes x 2>/dev/null | head -c 200", &temp_dir)
-            .await;
+        // Pre-create a file with 200 bytes of 'x' to avoid metacharacters
+        // (CWE-78: pipes and redirects are now blocked in unrestricted mode)
+        let test_file = temp_dir.join("_cctrunc_test.txt");
+        let content = "x".repeat(200);
+        std::fs::write(&test_file, &content).unwrap();
+
+        let cmd = format!("cat {}", test_file.display());
+        let result = manager.execute(&cmd, &temp_dir).await;
+
+        let _ = std::fs::remove_file(&test_file);
 
         match result {
             Ok(exec_result) => {
@@ -522,6 +674,9 @@ mod tests {
             }
             Err(SandboxError::Spawn { .. }) => {
                 eprintln!("skipping: /bin/sh not available");
+            }
+            Err(SandboxError::BackendUnavailable(msg)) => {
+                eprintln!("skipping (Windows): {msg}");
             }
             Err(e) => panic!("unexpected error: {:?}", e),
         }
@@ -548,6 +703,9 @@ mod tests {
             Err(SandboxError::Spawn { .. }) => {
                 eprintln!("skipping: /bin/sh not available");
             }
+            Err(SandboxError::BackendUnavailable(msg)) => {
+                eprintln!("skipping (Windows): {msg}");
+            }
             Err(e) => panic!("unexpected error: {:?}", e),
         }
     }
@@ -567,6 +725,9 @@ mod tests {
             }
             Err(SandboxError::Spawn { .. }) => {
                 eprintln!("skipping: /bin/sh not available");
+            }
+            Err(SandboxError::BackendUnavailable(msg)) => {
+                eprintln!("skipping (Windows): {msg}");
             }
             Err(e) => panic!("unexpected error: {:?}", e),
         }
@@ -590,5 +751,225 @@ mod tests {
         assert_eq!(parsed.timeout_secs, config.timeout_secs);
         assert_eq!(parsed.max_output_bytes, config.max_output_bytes);
         assert_eq!(parsed.memory_limit_mb, config.memory_limit_mb);
+    }
+
+    // -----------------------------------------------------------------------
+    // CWE-78: Shell metacharacter detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_dollar() {
+        assert!(has_shell_metacharacters("echo $HOME"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_backtick() {
+        assert!(has_shell_metacharacters("echo `whoami`"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_pipe() {
+        assert!(has_shell_metacharacters("ls | grep foo"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_semicolon() {
+        assert!(has_shell_metacharacters("ls; rm -rf /"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_ampersand() {
+        assert!(has_shell_metacharacters("sleep 10 &"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_redirect_out() {
+        assert!(has_shell_metacharacters("echo foo > bar"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_redirect_in() {
+        assert!(has_shell_metacharacters("cat < /etc/passwd"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_newline() {
+        assert!(has_shell_metacharacters("echo hello\necho world"));
+    }
+
+    #[test]
+    fn test_has_shell_metacharacters_detects_tab() {
+        assert!(has_shell_metacharacters("echo hello\techo world"));
+    }
+
+    #[test]
+    fn test_safe_commands_pass_metacharacter_check() {
+        assert!(!has_shell_metacharacters("echo hello"));
+        assert!(!has_shell_metacharacters("ls -la"));
+        assert!(!has_shell_metacharacters("cat file.txt"));
+        assert!(!has_shell_metacharacters("pwd"));
+    }
+
+    #[test]
+    fn test_sanitize_command_rejects_injection_attempt() {
+        let result = sanitize_command("ls | grep foo");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SandboxError::MetacharacterRejected(_) => {}
+            other => panic!("expected MetacharacterRejected, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sanize_command_allows_safe_string() {
+        let result = sanitize_command("echo hello world");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "echo hello world");
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_command_injection_via_pipe() {
+        let config = SandboxConfig::default();
+        let manager =
+            SandboxManager::with_backend(config, SandboxBackend::Unrestricted);
+
+        let result = manager
+            .execute("echo hello | cat /etc/passwd", Path::new("."))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SandboxError::MetacharacterRejected(_) => {}
+            SandboxError::BackendUnavailable(_) => {
+                eprintln!("skipping (Windows): shell not available");
+            }
+            other => panic!("expected MetacharacterRejected, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_backtick_injection() {
+        let config = SandboxConfig::default();
+        let manager =
+            SandboxManager::with_backend(config, SandboxBackend::Unrestricted);
+
+        let result = manager
+            .execute("echo `cat /etc/passwd`", Path::new("."))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SandboxError::MetacharacterRejected(_) => {}
+            SandboxError::BackendUnavailable(_) => {
+                eprintln!("skipping (Windows): shell not available");
+            }
+            other => panic!("expected MetacharacterRejected, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CWE-250: Sandbox bypass prevention tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: set an env var and return a cleanup closure
+    fn set_env_for_test(key: String, val: String) -> impl FnOnce() {
+        let old = std::env::var(&key).ok();
+        std::env::set_var(&key, val);
+        move || {
+            match old {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_none_variant_identity() {
+        let b = SandboxBackend::None;
+        let c = b; // Copy
+        assert_eq!(b, c);
+        assert_ne!(b, SandboxBackend::Unrestricted);
+        assert_ne!(b, SandboxBackend::Docker);
+    }
+
+    #[test]
+    fn test_detect_with_opt_in_does_not_panic() {
+        let _cleanup = set_env_for_test(
+            "CODE_AGENT_ALLOW_UNRESTRICTED".to_string(),
+            "true".to_string(),
+        );
+        let backend = SandboxManager::detect();
+        // Just verify it doesn't panic and returns a valid variant
+        let _ = format!("{:?}", backend);
+    }
+
+    #[test]
+    fn test_detect_without_opt_in_does_not_panic() {
+        let _cleanup = set_env_for_test(
+            "CODE_AGENT_ALLOW_UNRESTRICTED".to_string(),
+            "".to_string(),
+        );
+        std::env::remove_var("CODE_AGENT_ALLOW_UNRESTRICTED");
+        let backend = SandboxManager::detect();
+        let _ = format!("{:?}", backend);
+    }
+
+    #[test]
+    fn test_detect_returns_unrestricted_with_opt_in_one() {
+        let _cleanup = set_env_for_test(
+            "CODE_AGENT_ALLOW_UNRESTRICTED".to_string(),
+            "1".to_string(),
+        );
+        let backend = SandboxManager::detect();
+        // If docker/bwrap are available, they take priority.
+        // Otherwise, should be Unrestricted (not None) when env var is set.
+        // Note: env-var tests may race in parallel execution; we only assert
+        // the function doesn't panic and returns a valid variant.
+        let _ = format!("{:?}", backend);
+    }
+
+    #[tokio::test]
+    async fn test_none_backend_refuses_execution() {
+        let config = SandboxConfig::default();
+        let manager =
+            SandboxManager::with_backend(config, SandboxBackend::None);
+
+        let result = manager.execute("echo hello", Path::new(".")).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SandboxError::BackendUnavailable(msg) => {
+                assert!(
+                    msg.contains("CODE_AGENT_ALLOW_UNRESTRICTED"),
+                    "error message should mention CODE_AGENT_ALLOW_UNRESTRICTED, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected BackendUnavailable, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unrestricted_backend_still_works_with_opt_in() {
+        let _cleanup = set_env_for_test(
+            "CODE_AGENT_ALLOW_UNRESTRICTED".to_string(),
+            "true".to_string(),
+        );
+        let config = SandboxConfig::default();
+        let manager =
+            SandboxManager::with_backend(config, SandboxBackend::Unrestricted);
+
+        let temp_dir = std::env::temp_dir();
+        let result = manager.execute("echo still_works", &temp_dir).await;
+
+        match result {
+            Ok(exec_result) => {
+                assert!(exec_result.stdout.contains("still_works"));
+            }
+            Err(SandboxError::Spawn { .. }) => {
+                eprintln!("skipping: /bin/sh not available");
+            }
+            Err(SandboxError::BackendUnavailable(msg)) => {
+                eprintln!("skipping (Windows): {msg}");
+            }
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
     }
 }

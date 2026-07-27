@@ -37,6 +37,8 @@ use crate::agent::session::Session;
 pub struct ThreadManager {
     /// 按 ThreadId 索引的会话映射表
     threads: HashMap<ThreadId, Session>,
+    /// 按 ThreadId 索引的用户 ID 映射表
+    user_map: HashMap<ThreadId, String>,
     /// 最大并发线程数限制
     max_concurrent: usize,
 }
@@ -46,6 +48,7 @@ impl ThreadManager {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             threads: HashMap::new(),
+            user_map: HashMap::new(),
             max_concurrent,
         }
     }
@@ -62,6 +65,7 @@ impl ThreadManager {
         &mut self,
         id: ThreadId,
         session: Session,
+        user_id: String,
     ) -> Result<(), String> {
         if self.threads.len() >= self.max_concurrent {
             return Err(format!(
@@ -75,8 +79,34 @@ impl ThreadManager {
                 id
             ));
         }
-        self.threads.insert(id, session);
+        self.threads.insert(id.clone(), session);
+        self.user_map.insert(id, user_id);
         Ok(())
+    }
+
+    /// 获取指定用户的所有线程 ID
+    pub fn list_user_threads(&self, user_id: &str) -> Vec<ThreadId> {
+        self.user_map
+            .iter()
+            .filter(|(_, uid)| uid.as_str() == user_id)
+            .map(|(tid, _)| tid.clone())
+            .collect()
+    }
+
+    /// 检查指定线程是否存在
+    pub fn thread_exists(&self, thread_id: &ThreadId) -> bool {
+        self.threads.contains_key(thread_id)
+    }
+
+    /// 检查指定用户是否拥有该线程
+    ///
+    /// 注意：如果线程不存在，返回 `false`。调用方应先调用 `thread_exists()`
+    /// 区分「线程不存在」和「非所有者访问」两种场景。
+    pub fn check_ownership(&self, thread_id: &ThreadId, user_id: &str) -> bool {
+        self.user_map
+            .get(thread_id)
+            .map(|uid| uid.as_str() == user_id)
+            .unwrap_or(false)
     }
 
     /// 获取给定线程 ID 对应的会话的可变引用
@@ -86,6 +116,7 @@ impl ThreadManager {
 
     /// 移除并返回给定线程 ID 对应的会话
     pub fn remove_thread(&mut self, id: &ThreadId) -> Option<Session> {
+        self.user_map.remove(id);
         self.threads.remove(id)
     }
 
@@ -135,6 +166,7 @@ mod tests {
             tool_registry: Arc::new(DefaultToolRegistry::new()),
             external_cancel: None,
             max_context_tokens: None,
+            temperature: None,
         }
     }
 
@@ -145,20 +177,29 @@ mod tests {
         let session1 = Session::new(make_config("sess-1")).await;
         let session2 = Session::new(make_config("sess-2")).await;
 
-        tm.create_thread(ThreadId::from("t1"), session1).unwrap();
-        tm.create_thread(ThreadId::from("t2"), session2).unwrap();
+        tm.create_thread(ThreadId::from("t1"), session1, "alice".into()).unwrap();
+        tm.create_thread(ThreadId::from("t2"), session2, "bob".into()).unwrap();
 
         let threads = tm.list_threads();
         assert_eq!(threads.len(), 2);
         assert!(threads.contains(&ThreadId::from("t1")));
         assert!(threads.contains(&ThreadId::from("t2")));
+
+        // list_user_threads filters by user
+        let alice_threads = tm.list_user_threads("alice");
+        assert_eq!(alice_threads.len(), 1);
+        assert!(alice_threads.contains(&ThreadId::from("t1")));
+
+        // check_ownership
+        assert!(tm.check_ownership(&ThreadId::from("t1"), "alice"));
+        assert!(!tm.check_ownership(&ThreadId::from("t1"), "bob"));
     }
 
     #[tokio::test]
     async fn get_thread_returns_session() {
         let mut tm = ThreadManager::new(10);
         let session = Session::new(make_config("sess-1")).await;
-        tm.create_thread(ThreadId::from("t1"), session).unwrap();
+        tm.create_thread(ThreadId::from("t1"), session, "alice".into()).unwrap();
 
         let s = tm.get_thread(&ThreadId::from("t1"));
         assert!(s.is_some());
@@ -174,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn remove_thread_returns_session() {
         let mut tm = ThreadManager::new(10);
-        tm.create_thread(ThreadId::from("t1"), Session::new(make_config("sess-1")).await)
+        tm.create_thread(ThreadId::from("t1"), Session::new(make_config("sess-1")).await, "alice".into())
             .unwrap();
 
         let removed = tm.remove_thread(&ThreadId::from("t1"));
@@ -189,12 +230,14 @@ mod tests {
         tm.create_thread(
             ThreadId::from("t1"),
             Session::new(make_config("sess-1")).await,
+            "alice".into(),
         )
         .unwrap();
 
         let result = tm.create_thread(
             ThreadId::from("t1"),
             Session::new(make_config("sess-2")).await,
+            "bob".into(),
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already exists"));
@@ -206,17 +249,20 @@ mod tests {
         tm.create_thread(
             ThreadId::from("t1"),
             Session::new(make_config("sess-1")).await,
+            "alice".into(),
         )
         .unwrap();
         tm.create_thread(
             ThreadId::from("t2"),
             Session::new(make_config("sess-2")).await,
+            "alice".into(),
         )
         .unwrap();
 
         let result = tm.create_thread(
             ThreadId::from("t3"),
             Session::new(make_config("sess-3")).await,
+            "bob".into(),
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("max concurrent"));
@@ -231,6 +277,7 @@ mod tests {
         tm.create_thread(
             ThreadId::from("t1"),
             Session::new(make_config("sess-1")).await,
+            "alice".into(),
         )
         .unwrap();
         assert!(!tm.is_empty());

@@ -54,8 +54,9 @@ impl Tool for ListDirTool {
 
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResultMessage, ToolError> {
         let path = require_string(&params, "path")?;
+        let canonical_path = crate::tools::resolve_safe_path(&path)?;
 
-        let entries = std::fs::read_dir(&path).map_err(|e| {
+        let entries = std::fs::read_dir(&canonical_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ToolError::execution_error(format!("directory not found: {path}"))
             } else {

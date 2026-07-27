@@ -754,6 +754,7 @@ dependencies = [
 name = "code-agent-tools"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "code-agent-core",
  "code-agent-protocol",
  "futures",

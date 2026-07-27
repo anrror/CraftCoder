@@ -140,10 +140,12 @@ pub trait ModelClient: Send + Sync {
     /// # Arguments
     /// * `messages` — 对话历史（系统、用户、助手、工具结果）
     /// * `tools` — 模型可以调用的工具定义
+    /// * `temperature` — 每个请求的温度覆盖（`None` 表示使用客户端默认值）
     async fn complete_stream(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>>;
 
     /// 非流式补全 —— 用于简单查询
@@ -154,10 +156,11 @@ pub trait ModelClient: Send + Sync {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<String> {
         use futures::StreamExt;
 
-        let mut stream = self.complete_stream(messages, tools).await?;
+        let mut stream = self.complete_stream(messages, tools, temperature).await?;
         let mut result = String::new();
         while let Some(event) = stream.next().await {
             if let ResponseEvent::AgentMessageDelta { content } = event {

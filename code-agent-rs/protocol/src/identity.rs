@@ -234,6 +234,64 @@ impl From<&str> for TurnId {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UserId — 用户标识
+// ---------------------------------------------------------------------------
+
+/// 用户唯一标识 (User Identity Value Object)
+///
+/// 【领域含义】系统使用者的唯一标识。用于多用户场景下隔离线程/会话所有权。
+/// 由系统管理员在配置中分配，API Key 认证后映射到此 ID。
+///
+/// 【使用场景】
+/// - 在 ThreadManager 中标记线程属主
+/// - 在 Web API 中鉴权后提取当前用户
+/// - 在 SQLite sessions 表中标记会话所有者
+///
+/// 【约束】
+/// - 格式不限，建议使用字母数字短标识如 `"admin"`、`"alice"`
+/// - 空字符串表示"未分配/匿名"
+#[derive(
+    Clone, Debug, Display, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[display("{_0}")]
+pub struct UserId(pub String);
+
+impl UserId {
+    /// 从任意可转换为 String 的值创建 UserId
+    ///
+    /// ```rust
+    /// use code_agent_protocol::UserId;
+    /// let id = UserId::new("admin");
+    /// assert_eq!(id.to_string(), "admin");
+    /// ```
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// 返回空用户标识（匿名/未分配）。
+    pub fn anonymous() -> Self {
+        Self(String::new())
+    }
+
+    /// 判断是否为空/匿名用户。
+    pub fn is_anonymous(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<String> for UserId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for UserId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -55,13 +55,13 @@
 | Crate | 路径 | 说明 |
 |-------|------|------|
 | **code-agent-protocol** | `protocol/` | 共享协议类型与核心数据模型。定义 Agent 消息、工具调用、配置等所有跨 crate 类型。零依赖核心，被所有其他 crate 引用。 |
-| **code-agent-core** | `core/` | LLM 模型客户端抽象与 Provider 实现。支持 OpenAI 兼容 API、可观测性（tracing / OpenTelemetry）、对话管理、SQLite 持久化。 |
+| **code-agent-core** | `core/` | LLM 模型客户端抽象与 Provider 实现。支持 OpenAI 兼容 API、可观测性（tracing / OpenTelemetry）、对话管理、SQLite 持久化、反馈飞轮（feedback/flywheel）、Hook/Plugin/Command 扩展体系。 |
 | **code-agent-tools** | `tools/` | Agent 工具集：文件读写、Git 操作（git2）、Shell 命令执行、LSP 集成、MCP 协议支持。每个工具实现标准化的 Tool trait。 |
 | **code-agent-codex** | `codex/` | 代码理解引擎。基于 Tree-sitter 的多语言 AST 解析（Python/TypeScript/Rust/Go/Java），代码索引与搜索（SQLite + blake3 指纹）、文件监视、LRU 缓存。 |
 | **code-agent-eval** | `eval/` | 评估基准框架。定义 Dataset / Task / Runner 抽象，支持 SWE-bench 等基准的本地运行与结果对比。 |
 | **code-agent-cli** | `cli/` | 交互式终端 UI。基于 ratatui + crossterm 构建，提供 TUI 聊天界面、配置管理、评估运行入口。 |
 | **code-agent-app-server** | `app-server/` | JSON-RPC 2.0 应用服务器。为 IDE 集成提供标准协议接口，VS Code 扩展通过此服务与 Agent 通信。 |
-| **code-agent-web** | `code-agent-web/` | Web API 服务。基于 Axum 框架，提供 REST + SSE 接口，支持浏览器端交互。 |
+| **code-agent-web** | `code-agent-web/` | Web API 服务 + React SPA 管理面板。基于 Axum 框架提供 REST + SSE 接口，内置 React + TypeScript + Vite 构建的管理面板，支持线程管理、实时对话、Token 用量监控。 |
 | **eval-runner** | `eval-runner/` | 评估运行器 CLI。CI 流水线中执行基准测试并输出对比结果。 |
 
 ## 功能特性
@@ -149,6 +149,14 @@ pub trait Tool: Send + Sync {
 
 工具执行层内置基本安全机制：路径穿越检测防止越权访问文件；Shell 命令执行在受控工作区中运行；Git 操作限制在 workspace 范围内；工具调用记录操作日志。生产环境中可通过配置禁用高风险工具。
 
+- 工作区边界强制执行（CWE-22 路径穿越防护）
+- Shell 元字符检测与命令注入防护（CWE-78）
+- 沙箱显式 opt-in 门控（CWE-250）
+- Git 身份强制验证（CWE-290）
+- CORS 限制 + API Key 认证（CWE-942）
+- 内容安全双层审查（正则预过滤 + Qwen3Guard）
+- MCP 环境变量注入门控（CODE_AGENT_ALLOW_MCP_ENV）
+
 ### 可观测性内置
 
 从项目第一天起就内置了结构化日志。每个 LLM 请求、工具调用、Agent 决策都记录结构化事件。开发阶段通过 tracing-subscriber 输出彩色日志，生产环境可切换 JSON 格式。OpenTelemetry 链路追踪为可选功能，需启用 `otlp` feature 并配置 Collector 端点。
@@ -183,7 +191,8 @@ y-ai-coding/
 │   ├── app-server/             # code-agent-app-server crate
 │   ├── protocol/               # code-agent-protocol crate
 │   ├── eval-runner/            # eval-runner crate
-│   └── code-agent-web/         # code-agent-web crate（Web API）
+│       └── code-agent-web/         # code-agent-web crate（Web API + React SPA）
+│       └── ui/                 # React + TypeScript + Vite 前端源码
 │
 ├── code-agent-eval-py/         # Python 评估套件
 │   ├── README.md               # 使用说明
@@ -435,26 +444,26 @@ python -m code_agent_eval.run --benchmark humaneval
 
 ### 生产就绪（当前阶段）
 - [x] OpenTelemetry 可观测性（可选功能，启用 `otlp` feature）
-- [ ] Docker 容器化部署
-- [ ] 多用户会话管理
-- [ ] 权限与安全审计
-- [ ] 性能优化与缓存
+- [x] Docker 容器化部署
+- [x] 多用户会话管理（API Key → UserId 映射，线程隔离，可选）
+- [x] 权限与安全审计
+- [x] 性能优化与缓存
 
 ### 生态扩展
-- [ ] 插件系统
+- [x] 插件系统
 - [ ] 自定义工具 SDK
 - [x] 更多 LLM Provider（Anthropic / Google Gemini）— 已实现
-- [ ] Web UI 管理面板
+- [x] Web UI 管理面板（React + TypeScript + Vite，线程管理/实时对话/Token 监控）
 - [ ] 团队协作功能
 
 ### AI 原生开发工作台（v2 架构）
-- [ ] Phase A: Delegator/Coder 双角色架构（基于现有 SubAgentManager）
-- [ ] Phase B: Plan 引擎（三级分解 + DAG 依赖图）
-- [ ] Phase C: 上下文增强（LLM 摘要 + 滑动窗口 + Token 预算）
-- [ ] Phase D: Spec 驱动流水线 + 质量门禁
-- [ ] Phase E: 知识体系（Rules/Skills/企业知识库）
-- [ ] Phase F: 工具生态（插件/Hooks/Commands）
-- [ ] Phase G: 数据飞轮闭环
+- [x] Phase A: Delegator/Coder 双角色架构（基于现有 SubAgentManager）
+- [x] Phase B: Plan 引擎（三级分解 + DAG 依赖图）
+- [x] Phase C: 上下文增强（LLM 摘要 + 滑动窗口 + Token 预算）
+- [x] Phase D: Spec 驱动流水线 + 质量门禁
+- [x] Phase E: 知识体系（Rules/Skills/企业知识库）
+- [x] Phase F: 工具生态（插件/Hooks/Commands）
+- [x] Phase G: 数据飞轮闭环
 
 ## 开发指南
 

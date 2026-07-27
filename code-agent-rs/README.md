@@ -84,7 +84,10 @@ code-agent-rs/
 | `safety` | 安全防护上下文 | `SafetyClient`, `ContentGuard` | 提示注入防御、内容安全审查、Qwen3Guard 集成 |
 | `observability` | 可观测性上下文 | `Telemetry`, `StructuredLogger` | OpenTelemetry 追踪、结构化 JSON 日志（feature gate） |
 | `feedback` | 反馈收集上下文 | `FeedbackCollector` | 用户反馈采集与分析 |
-| `flywheel` | 飞轮分析上下文 | `FailureCluster`, `PatternAnalyzer` | 失败聚类、模式识别、改进建议 |
+| `flywheel` | 飞轮分析上下文 | `FlywheelCollector`, `FailureAnalyzer`, `ImprovementSuggester`, `NightlyPipeline` | 错误追踪收集、失败聚类分析、改进建议生成、夜间管道 |
+| `tools/hook` | 工具生命周期上下文 | `ToolHook` trait, `HookRegistry`, `ToolEvent`（8 种事件） | Phase F 钩子系统：工具执行前后事件拦截 |
+| `tools/plugin` | 插件上下文 | `Plugin` trait, `PluginManager`, `McpConnector` | Phase F 动态工具加载、MCP 连接器抽象 |
+| `tools/command` | 命令上下文 | `Command`, `CommandRegistry`, `/help`, `/status` | Phase F 斜杠命令系统 |
 | `persistence` | 持久化上下文 | `SessionStore`, `SnapshotManager` | 会话状态保存、恢复与快照（基于 rusqlite） |
 
 **关键 Trait**:
@@ -127,7 +130,8 @@ code-agent-rs/
 
 **Shell 模块详解**:
 - 支持三种执行模式：无限制（本地直接执行）、bubblewrap（Linux 沙箱）、Docker 容器隔离
-- 自动检测系统可用沙箱能力，按优先级降级
+- 自动检测系统可用沙箱能力，按优先级降级；`SandboxBackend::None`（无沙箱可用时）拒绝执行，需设置 `CODE_AGENT_ALLOW_UNRESTRICTED=true` 才能回退到无限制模式（CWE-250 门控）
+- Shell 元字符检测（`$ | ; & \` `` 等）阻止命令注入攻击（CWE-78 防护）
 - 命令执行超时控制、输出大小限制、环境变量过滤
 
 **LSP 模块详解**:
@@ -139,11 +143,14 @@ code-agent-rs/
 - 基于 git2（libgit2 绑定）实现，无需安装独立 Git CLI
 - 支持 diff 生成、提交创建、分支操作、状态查询
 - 操作前进行安全策略检查（禁止操作范围外的仓库）
+- `build_signature()` 拒绝硬编码身份，要求通过 git config 或 `CODE_AGENT_GIT_AUTHOR_NAME` / `CODE_AGENT_GIT_AUTHOR_EMAIL` 环境变量提供作者信息（CWE-290 身份验证）
 
 **MCP 模块详解**:
 - 实现模型上下文协议（Model Context Protocol）客户端
 - 支持远程工具发现、注册和调用
 - 与 MCP 服务器通过 JSON-RPC 2.0 over stdio 通信
+- 通过环境变量注册 MCP 服务器需设置 `CODE_AGENT_ALLOW_MCP_ENV=true` 门控
+- 单服务器工具上限 `MAX_TOOLS_PER_SERVER = 100`，行长度上限 `MAX_LINE_BYTES = 1 MiB`（DoS 防护）
 
 ---
 
@@ -334,23 +341,35 @@ IDE Plugin ──stdin──▶ AppServer ──▶ ThreadManager ──▶ Sess
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/chat` | 提交对话消息，返回 SSE 事件流 |
-| GET | `/api/sessions` | 列出所有会话 |
-| GET | `/api/sessions/:id` | 获取会话详情 |
-| DELETE | `/api/sessions/:id` | 删除会话 |
+| POST | `/threads` | 创建新线程 |
+| GET | `/threads` | 列出所有线程 |
+| POST | `/threads/:id/turns` | 提交轮次输入，返回 SSE 事件流 |
+| GET | `/threads/:id/events` | 获取线程的 SSE 事件流 |
+| DELETE | `/threads/:id` | 删除线程 |
 | GET | `/health` | 健康检查端点 |
 | GET | `/` | 静态文件服务（Web UI） |
 
-**SSE 事件格式**:
+**SSE 事件类型**:
+
+| 事件类型 | 说明 |
+|----------|------|
+| `turn_started` | 轮次开始，包含 turn_id |
+| `agent_message_delta` | Agent 消息增量（流式文本） |
+| `tool_call_begin` | 工具调用开始，包含工具名称和参数 |
+| `tool_call_end` | 工具调用结束，包含执行结果 |
+| `token_usage` | Token 用量统计 |
+| `turn_complete` | 轮次完成，包含最终消息 |
+| `error` | 执行错误 |
+
 ```
-event: message_delta
+event: agent_message_delta
 data: {"content": "正在分析代码..."}
 
-event: tool_call
-data: {"name": "read_file", "arguments": {"path": "src/main.rs"}}
+event: tool_call_begin
+data: {"name": "read_file", "arguments": {"path": "src/main.rs"}, "call_id": "call_xxx"}
 
 event: turn_complete
-data: {"final_message": "分析完成。"}
+data: {"turn_id": "turn_xxx", "final_message": "分析完成。"}
 ```
 
 ---
@@ -507,10 +526,15 @@ TurnStarted
 
 安全机制贯穿系统全链路：
 
-| 层级 | 安全措施 | 实现位置 |
-|------|---------|---------|
-| 输入层 | 提示注入检测、敏感信息过滤 | core::safety |
-| 工具层 | 命令沙箱执行、路径白名单、Git 操作范围限制 | tools::shell, tools::git |
-| 权限层 | PermissionMode（Auto/Permit/Block）、CapabilityLevel（Read/Edit/Exec） | protocol::config |
-| 输出层 | 内容安全审查、敏感信息脱敏 | core::safety |
-| 审计层 | 全量操作日志、Token 用量追踪 | core::observability |
+| 层级 | 安全措施 | 实现位置 | CWE |
+|------|---------|---------|-----|
+| 输入层 | 提示注入检测、敏感信息过滤 | core::safety | — |
+| 输入层 | 工作区边界强制、路径穿越防御 | core::tools | CWE-22 |
+| 工具层 | 命令沙箱执行、路径白名单、Git 操作范围限制 | tools::shell, tools::git | — |
+| 工具层 | Shell 元字符检测、命令注入防护 | tools::shell | CWE-78 |
+| 工具层 | 沙箱门控（需显式 opt-in 才能无沙箱执行） | tools::shell | CWE-250 |
+| 工具层 | Git 身份强制验证（拒绝硬编码身份） | tools::git | CWE-290 |
+| 权限层 | PermissionMode（Auto/Permit/Block）、CapabilityLevel（Read/Edit/Exec） | protocol::config | — |
+| 输出层 | 内容安全审查、正则预过滤 + 守卫模型 | core::safety | CWE-184 |
+| 输出层 | CORS 来源限制 + API 认证 | code-agent-web | CWE-942 |
+| 审计层 | 全量操作日志、Token 用量追踪 | core::observability | — |

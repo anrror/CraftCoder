@@ -91,9 +91,10 @@ async fn main() {
     // Create model client
     let model_client = create_model_client(ProviderKind::from_model_name(&model_config.model), model_config);
 
-    // Create tool registry and register all built-in tools
+    // Create tool registry and register all built-in tools + MCP plugins
     let mut tool_registry = DefaultToolRegistry::new();
     code_agent_tools::register_all_core_tools(&mut tool_registry);
+    code_agent_tools::mcp::register_from_env(&mut tool_registry);
 
     // Create thread manager (max 100 concurrent threads)
     let thread_manager = Arc::new(std::sync::Mutex::new(ThreadManager::new(100)));

@@ -742,6 +742,7 @@ impl ModelClient for AnthropicClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>> {
         let (anthropic_messages, _system) = convert_messages_anthropic(messages);
 
@@ -756,7 +757,7 @@ impl ModelClient for AnthropicClient {
                 Some(convert_tools_anthropic(tools))
             },
             stream: true,
-            temperature: Some(self.config.temperature),
+            temperature: Some(temperature.unwrap_or(self.config.temperature)),
         };
 
         let response = self.execute_with_retry(&request).await?;
@@ -769,6 +770,7 @@ impl ModelClient for AnthropicClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        temperature: Option<f32>,
     ) -> ModelResult<String> {
         let (anthropic_messages, _system) = convert_messages_anthropic(messages);
 
@@ -783,7 +785,7 @@ impl ModelClient for AnthropicClient {
                 Some(convert_tools_anthropic(tools))
             },
             stream: false,
-            temperature: Some(self.config.temperature),
+            temperature: Some(temperature.unwrap_or(self.config.temperature)),
         };
 
         let response = self.execute_with_retry(&request).await?;

@@ -19,7 +19,7 @@ use code_agent_core::model::ModelClient;
 use code_agent_core::tools::registry::ToolRegistry;
 use code_agent_protocol::{PermissionMode, SessionId, ThreadId};
 use tokio::sync::{Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Shared application state
@@ -64,6 +64,8 @@ pub struct ThreadConfig {
     pub system_instructions: String,
     pub max_iterations: usize,
     pub permission_mode: PermissionMode,
+    pub model: Option<String>,
+    pub temperature: Option<f32>,
 }
 
 /// Shared application state accessible from all route handlers.
@@ -78,21 +80,44 @@ pub struct AppState {
     pub thread_configs: Arc<RwLock<HashMap<ThreadId, ThreadConfig>>>,
     /// Per-thread event history.
     pub event_histories: Arc<RwLock<HashMap<ThreadId, EventHistory>>>,
-    /// API key for authentication (None = localhost-only default).
-    pub api_key: Option<String>,
+    /// API key → UserId mapping (empty = require explicit anonymous opt-in).
+    pub api_keys: HashMap<String, String>,
+    /// Whether to allow anonymous requests when no API keys are configured.
+    pub allow_anonymous: bool,
+    /// Allowed origins for CORS (default: localhost only).
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl AppState {
     /// Create a new AppState with default configuration.
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(api_keys: HashMap<String, String>) -> Self {
         Self {
             thread_manager: Arc::new(Mutex::new(ThreadManager::new(100))),
             model_client: None,
             tool_registry: None,
             thread_configs: Arc::new(RwLock::new(HashMap::new())),
             event_histories: Arc::new(RwLock::new(HashMap::new())),
-            api_key,
+            api_keys,
+            allow_anonymous: false,
+            cors_allowed_origins: vec![
+                "http://localhost:3000".to_string(),
+            ],
         }
+    }
+
+    /// Authenticate a request header key.
+    /// Returns `Some(user_id)` on success, `None` on failure.
+    /// When no keys are configured, anonymous access requires explicit
+    /// opt-in via [`with_anonymous`](Self::with_anonymous).
+    pub fn authenticate(&self, header_key: Option<&str>) -> Option<String> {
+        if self.api_keys.is_empty() {
+            if self.allow_anonymous {
+                return Some(String::new());
+            }
+            return None;
+        }
+        let key = header_key?;
+        self.api_keys.get(key).cloned()
     }
 
     /// Set the model client.
@@ -107,13 +132,57 @@ impl AppState {
         self
     }
 
+    /// Enable anonymous access when no API keys are configured.
+    ///
+    /// # Security
+    ///
+    /// This logs a warning — anonymous mode should only be used for
+    /// local development or when an external auth proxy is in place.
+    pub fn with_anonymous(mut self) -> Self {
+        self.allow_anonymous = true;
+        warn!("Running without API keys - all requests allowed. Set api_keys for production use.");
+        self
+    }
+
+    /// Set the allowed CORS origins (replaces defaults).
+    pub fn with_cors_origins(mut self, origins: Vec<String>) -> Self {
+        self.cors_allowed_origins = origins;
+        self
+    }
+
     /// Create a new thread with the given parameters.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_thread(
         &self,
         thread_id: ThreadId,
         system_instructions: String,
         max_iterations: usize,
+        model: Option<String>,
+        temperature: Option<f32>,
+        user_id: String,
     ) -> Result<serde_json::Value, String> {
+        // P1: system_instructions 输入校验 — 防 LLM prompt 注入
+        const MAX_SYSTEM_INSTRUCTIONS_LEN: usize = 4096;
+        if system_instructions.len() > MAX_SYSTEM_INSTRUCTIONS_LEN {
+            return Err(format!(
+                "system_instructions too long: {} bytes exceeds {} bytes limit",
+                system_instructions.len(),
+                MAX_SYSTEM_INSTRUCTIONS_LEN
+            ));
+        }
+        // P1: 拒绝已知危险模式（base64 大段文本/角色混淆/DAN 激活词）
+        let blocked: &[&str] = &[
+            "ignore all", "ignore previous", "ignore above",
+            "you are dan", "you are now dan",
+            "disregard", "pretend you are",
+            "system: ", "system\n", "system:\n",
+        ];
+        if let Some(found) = blocked.iter().find(|p| system_instructions.to_lowercase().contains(*p)) {
+            return Err(format!(
+                "system_instructions contains blocked pattern: {found}"
+            ));
+        }
+
         let mc = self
             .model_client
             .as_ref()
@@ -134,9 +203,13 @@ impl AppState {
             tool_registry: Arc::clone(tr),
             external_cancel: None,
             max_context_tokens: None,
+            temperature,
         };
 
         let session = Session::new(config).await;
+
+        // Clone model before moving into ThreadConfig (needed for response)
+        let model_clone = model.clone();
 
         // Store config
         {
@@ -147,7 +220,9 @@ impl AppState {
                     session_id: session_id.clone(),
                     system_instructions,
                     max_iterations,
-                    permission_mode: PermissionMode::Auto,
+            permission_mode: PermissionMode::Permit,  // H2: 默认 Permit，仅允许 Read 工具，Edit/Exec 需用户确认
+                    model,
+                    temperature,
                 },
             );
         }
@@ -160,10 +235,12 @@ impl AppState {
 
         // Register thread
         let mut tm = self.thread_manager.lock().await;
-        match tm.create_thread(thread_id.clone(), session) {
+        match tm.create_thread(thread_id.clone(), session, user_id) {
             Ok(()) => Ok(serde_json::json!({
                 "thread_id": thread_id.0,
                 "session_id": session_id.0,
+                "model": model_clone,
+                "temperature": temperature,
             })),
             Err(e) => {
                 // Cleanup on failure
@@ -188,7 +265,7 @@ impl AppState {
                 info!(thread_id = %thread_id, "Thread deleted");
                 Ok(())
             }
-            None => Err(format!("Thread not found: {thread_id}")),
+            None => Err("Thread not found".to_string()),
         }
     }
 
@@ -241,19 +318,6 @@ pub fn sse_response_event(event: &code_agent_protocol::ResponseEvent) -> String 
 }
 
 // ---------------------------------------------------------------------------
-// Auth helpers
-// ---------------------------------------------------------------------------
-
-/// Check if the request has a valid API key.
-/// If no API key is configured, allow all requests (localhost default).
-pub fn check_auth(api_key: &Option<String>, header_key: Option<&str>) -> bool {
-    match api_key {
-        Some(key) => header_key.map(|h| h == key).unwrap_or(false),
-        None => true, // No API key configured = allow all
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -285,17 +349,27 @@ mod tests {
     }
 
     #[test]
-    fn auth_no_key_allows_all() {
-        assert!(check_auth(&None, None));
-        assert!(check_auth(&None, Some("anything")));
+    fn auth_no_key_blocks_when_anonymous_disabled() {
+        let state = AppState::new(HashMap::new());
+        assert_eq!(state.authenticate(None), None);
+        assert_eq!(state.authenticate(Some("anything")), None);
+    }
+
+    #[test]
+    fn auth_no_key_allows_when_anonymous_enabled() {
+        let state = AppState::new(HashMap::new()).with_anonymous();
+        assert_eq!(state.authenticate(None), Some(String::new()));
+        assert_eq!(state.authenticate(Some("anything")), Some(String::new()));
     }
 
     #[test]
     fn auth_with_key_requires_match() {
-        let key = Some("secret".into());
-        assert!(!check_auth(&key, None));
-        assert!(!check_auth(&key, Some("wrong")));
-        assert!(check_auth(&key, Some("secret")));
+        let mut keys = HashMap::new();
+        keys.insert("secret".into(), "alice".into());
+        let state = AppState::new(keys);
+        assert_eq!(state.authenticate(None), None);
+        assert_eq!(state.authenticate(Some("wrong")), None);
+        assert_eq!(state.authenticate(Some("secret")), Some("alice".into()));
     }
 
     #[test]

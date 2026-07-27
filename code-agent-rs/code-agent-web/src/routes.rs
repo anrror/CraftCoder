@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, Sse},
         IntoResponse, Json,
@@ -24,9 +24,10 @@ use axum::{
 use code_agent_protocol::{Message, ThreadId, TurnInput};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{error, info};
 
-use crate::{check_auth, sse_response_event, AppState};
+use crate::{sse_response_event, AppState};
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -44,6 +45,14 @@ pub struct CreateThreadRequest {
     /// Maximum ReAct iterations per turn.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    /// Optional model name override (e.g. "gpt-4o", "qwen3.6-27b").
+    /// If empty/unset, the server default is used.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional sampling temperature (0.0–2.0).
+    /// If unset, the server default is used.
+    #[serde(default)]
+    pub temperature: Option<f32>,
 }
 
 fn default_max_iterations() -> usize {
@@ -100,12 +109,15 @@ pub async fn create_thread(
     Json(body): Json<CreateThreadRequest>,
 ) -> impl IntoResponse {
     // Auth check
-    if !check_auth(&state.api_key, extract_api_key(&headers)) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Unauthorized"})),
-        );
-    }
+    let user_id = match state.authenticate(extract_api_key(&headers)) {
+        Some(uid) => uid,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            );
+        }
+    };
 
     let thread_id = ThreadId::from(
         body.thread_id
@@ -113,7 +125,14 @@ pub async fn create_thread(
     );
 
     match state
-        .create_thread(thread_id.clone(), body.system_instructions, body.max_iterations)
+        .create_thread(
+                    thread_id.clone(),
+                    body.system_instructions,
+                    body.max_iterations,
+                    body.model,
+                    body.temperature,
+                    user_id,
+                )
         .await
     {
         Ok(result) => {
@@ -141,24 +160,34 @@ pub async fn submit_turn(
     Json(body): Json<SubmitTurnRequest>,
 ) -> impl IntoResponse {
     // Auth check
-    if !check_auth(&state.api_key, extract_api_key(&headers)) {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Unauthorized"})),
-        ));
-    }
+    let user_id = match state.authenticate(extract_api_key(&headers)) {
+        Some(uid) => uid,
+        None => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            ));
+        }
+    };
 
     let thread_id = ThreadId::from(thread_id_str.as_str());
 
     // Remove the session from the manager (to avoid holding lock across await)
     let mut session = {
         let mut tm = state.thread_manager.lock().await;
+        // C1: Enforce thread ownership before access
+        if !tm.check_ownership(&thread_id, &user_id) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Forbidden: thread does not belong to this user"})),
+            ));
+        }
         match tm.remove_thread(&thread_id) {
             Some(s) => s,
             None => {
                 return Err((
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("Thread not found: {thread_id}")})),
+                    Json(serde_json::json!({"error": "Thread not found".to_string()})),
                 ));
             }
         }
@@ -192,9 +221,9 @@ pub async fn submit_turn(
             }
         }
 
-        // Re-insert the session into the thread manager
+        // Re-insert the session into the thread manager (C9: preserve user_id)
         let mut tm = state_clone.thread_manager.lock().await;
-        if let Err(e) = tm.create_thread(tid.clone(), session) {
+        if let Err(e) = tm.create_thread(tid.clone(), session, user_id) {
             error!(thread_id = %tid, error = %e, "Failed to re-insert session after turn");
         }
     });
@@ -218,14 +247,34 @@ pub async fn get_events(
     Path(thread_id_str): Path<String>,
 ) -> impl IntoResponse {
     // Auth check
-    if !check_auth(&state.api_key, extract_api_key(&headers)) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Unauthorized"})),
-        );
-    }
+    let user_id = match state.authenticate(extract_api_key(&headers)) {
+        Some(uid) => uid,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            );
+        }
+    };
 
     let thread_id = ThreadId::from(thread_id_str.as_str());
+
+    // C1: Check thread exists first, then enforce ownership
+    {
+        let tm = state.thread_manager.lock().await;
+        if !tm.thread_exists(&thread_id) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Thread not found".to_string()})),
+            );
+        }
+        if !tm.check_ownership(&thread_id, &user_id) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Forbidden: thread does not belong to this user"})),
+            );
+        }
+    }
 
     match state.get_event_history(&thread_id).await {
         Some(event_strings) => {
@@ -251,7 +300,7 @@ pub async fn get_events(
         }
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Thread not found: {thread_id}")})),
+            Json(serde_json::json!({"error": "Thread not found".to_string()})),
         ),
     }
 }
@@ -263,14 +312,34 @@ pub async fn delete_thread(
     Path(thread_id_str): Path<String>,
 ) -> impl IntoResponse {
     // Auth check
-    if !check_auth(&state.api_key, extract_api_key(&headers)) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Unauthorized"})),
-        );
-    }
+    let user_id = match state.authenticate(extract_api_key(&headers)) {
+        Some(uid) => uid,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            );
+        }
+    };
 
     let thread_id = ThreadId::from(thread_id_str.as_str());
+
+    // C1: Check thread exists first, then enforce ownership
+    {
+        let tm = state.thread_manager.lock().await;
+        if !tm.thread_exists(&thread_id) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Thread not found".to_string()})),
+            );
+        }
+        if !tm.check_ownership(&thread_id, &user_id) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Forbidden: thread does not belong to this user"})),
+            );
+        }
+    }
 
     match state.delete_thread(&thread_id).await {
         Ok(()) => (
@@ -302,15 +371,23 @@ pub async fn list_threads(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Auth check
-    if !check_auth(&state.api_key, extract_api_key(&headers)) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Unauthorized"})),
-        );
-    }
+    let user_id = match state.authenticate(extract_api_key(&headers)) {
+        Some(uid) => uid,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            );
+        }
+    };
 
-    let configs = state.thread_configs.read().await;
-    let thread_ids: Vec<String> = configs.keys().map(|id| id.0.clone()).collect();
+    // C10: Only return threads belonging to the authenticated user
+    let tm = state.thread_manager.lock().await;
+    let thread_ids: Vec<String> = tm
+        .list_user_threads(&user_id)
+        .iter()
+        .map(|id| id.0.clone())
+        .collect();
 
     (
         StatusCode::OK,
@@ -327,12 +404,24 @@ pub async fn list_threads(
 
 /// Build the Axum router for all web API routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    // Build CORS layer from the configured allowed origins
+    let origins: Vec<HeaderValue> = state
+        .cors_allowed_origins
+        .iter()
+        .filter_map(|o| o.parse::<HeaderValue>().ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         .route("/health", get(health_check))
         .route("/threads", post(create_thread).get(list_threads))
         .route("/threads/:id/turns", post(submit_turn))
         .route("/threads/:id/events", get(get_events))
         .route("/threads/:id", delete(delete_thread))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -351,7 +440,8 @@ mod tests {
     use code_agent_core::model::ModelClient;
     use code_agent_core::tools::registry::DefaultToolRegistry;
     use code_agent_protocol::ResponseEvent;
-    use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::Arc;
     use tower::util::ServiceExt;
 
     // ── Mock Model Client ──────────────────────────────────────────────
@@ -368,6 +458,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[code_agent_core::model::ToolDefinition],
+            _temperature: Option<f32>,
         ) -> code_agent_core::model::ModelResult<
             Box<dyn futures::Stream<Item = ResponseEvent> + Send + Unpin>,
         > {
@@ -387,9 +478,10 @@ mod tests {
         let mc = Arc::new(MockModelClient);
             let tr = Arc::new(DefaultToolRegistry::new());
         Arc::new(
-            AppState::new(None)
+            AppState::new(HashMap::new())
                 .with_model_client(mc)
-                .with_tool_registry(tr),
+                .with_tool_registry(tr)
+                .with_anonymous(),
         )
     }
 
@@ -407,6 +499,8 @@ mod tests {
                     thread_id: Some("test-thread".into()),
                     system_instructions: "You are a test assistant.".into(),
                     max_iterations: 10,
+                    model: None,
+                    temperature: None,
                 })
                 .unwrap(),
             ))
@@ -432,6 +526,8 @@ mod tests {
             thread_id: Some("dup".into()),
             system_instructions: "".into(),
             max_iterations: 10,
+            model: None,
+            temperature: None,
         })
         .unwrap();
 
@@ -471,6 +567,8 @@ mod tests {
                     thread_id: Some("to-delete".into()),
                     system_instructions: "".into(),
                     max_iterations: 10,
+                    model: None,
+                    temperature: None,
                 })
                 .unwrap(),
             ))
@@ -513,7 +611,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_required() {
-        let state = Arc::new(AppState::new(Some("secret-key".into())));
+        let mut keys = HashMap::new();
+        keys.insert("secret-key".into(), String::new());
+        let state = Arc::new(AppState::new(keys));
         let app = build_router(state);
 
         // No auth header
@@ -526,6 +626,8 @@ mod tests {
                     thread_id: None,
                     system_instructions: "".into(),
                     max_iterations: 10,
+                    model: None,
+                    temperature: None,
                 })
                 .unwrap(),
             ))
@@ -538,8 +640,10 @@ mod tests {
     async fn test_auth_with_valid_key() {
         let mc = Arc::new(MockModelClient);
             let tr = Arc::new(DefaultToolRegistry::new());
+        let mut keys = HashMap::new();
+        keys.insert("valid-key".into(), String::new());
         let state = Arc::new(
-            AppState::new(Some("valid-key".into()))
+            AppState::new(keys)
                 .with_model_client(mc)
                 .with_tool_registry(tr),
         );
@@ -555,6 +659,8 @@ mod tests {
                     thread_id: Some("auth-test".into()),
                     system_instructions: "".into(),
                     max_iterations: 10,
+                    model: None,
+                    temperature: None,
                 })
                 .unwrap(),
             ))

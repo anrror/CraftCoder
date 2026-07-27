@@ -5,7 +5,6 @@
 
 use async_trait::async_trait;
 use code_agent_protocol::CapabilityLevel;
-use std::path::Path;
 
 use crate::tools::{require_string, tool_success, Tool, ToolError, ToolResultMessage};
 
@@ -61,17 +60,16 @@ impl Tool for WriteFileTool {
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResultMessage, ToolError> {
         let path_str = require_string(&params, "path")?;
         let content = require_string(&params, "content")?;
-
-        let path = Path::new(&path_str);
+        let canonical_path = crate::tools::resolve_safe_path_create(&path_str)?;
 
         // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = canonical_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
             }
         }
 
-        std::fs::write(path, &content)?;
+        std::fs::write(&canonical_path, &content)?;
 
         let byte_count = content.len();
         let line_count = content.lines().count();

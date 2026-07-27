@@ -118,7 +118,7 @@ impl Tool for LspDiagnosticsTool {
                         .unwrap_or_else(|_| "failed to serialize".to_string()),
                 ))
             }
-            Err(e) => Ok(tool_error("", &format!("LSP diagnostics failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("LSP diagnostics failed: {e}"))),
         }
     }
 }
@@ -230,7 +230,7 @@ impl Tool for LspDefinitionTool {
                         .unwrap_or_else(|_| "[]".to_string()),
                 ))
             }
-            Err(e) => Ok(tool_error("", &format!("LSP definition failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("LSP definition failed: {e}"))),
         }
     }
 }
@@ -342,7 +342,7 @@ impl Tool for LspReferencesTool {
                         .unwrap_or_else(|_| "[]".to_string()),
                 ))
             }
-            Err(e) => Ok(tool_error("", &format!("LSP references failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("LSP references failed: {e}"))),
         }
     }
 }
@@ -437,7 +437,7 @@ impl Tool for LspHoverTool {
         match state.client.hover(language, PathBuf::from(file).as_path(), line, character).await {
             Ok(Some(info)) => Ok(tool_success("", info)),
             Ok(None) => Ok(tool_success("", "No hover information available.")),
-            Err(e) => Ok(tool_error("", &format!("LSP hover failed: {e}"))),
+            Err(e) => Ok(tool_error("", format!("LSP hover failed: {e}"))),
         }
     }
 }

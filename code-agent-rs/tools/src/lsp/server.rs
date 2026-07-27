@@ -179,6 +179,9 @@ impl LspServerManager {
         // (this is the default on Windows).
         cmd.kill_on_drop(true);
 
+        // P0-3: 清除敏感环境变量，防止 LLM_API_KEY 等凭据泄露给 LSP 子进程
+        crate::filter_sensitive_env(&mut cmd);
+
         let mut child = cmd.spawn().map_err(|source| LspError::ServerStart {
             language: language.to_string(),
             source,

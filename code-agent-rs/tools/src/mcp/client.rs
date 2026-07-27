@@ -146,7 +146,8 @@ impl McpTransport {
                     source: e,
                 })?;
 
-                // Read the response (one JSON line)
+                // Read the response (one JSON line) — C12: 限制行长度防 DoS
+                const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
                 let mut line = String::new();
                 stdout
                     .read_line(&mut line)
@@ -159,6 +160,16 @@ impl McpTransport {
                     return Err(McpClientError::Connection {
                         server: server.to_string(),
                         reason: "server closed stdout unexpectedly".into(),
+                    });
+                }
+                // C12: 拒绝超大单行响应，防止恶意 MCP 服务器导致 agent OOM
+                if line.len() > MAX_LINE_BYTES {
+                    return Err(McpClientError::Connection {
+                        server: server.to_string(),
+                        reason: format!(
+                            "server sent oversized line ({} bytes > {} bytes max)",
+                            line.len(), MAX_LINE_BYTES
+                        ),
                     });
                 }
                 serde_json::from_str(&line).map_err(|e| McpClientError::Json {
@@ -353,7 +364,10 @@ impl McpClientManager {
         command: &str,
         args: &[&str],
     ) -> McpClientResult<()> {
-        let mut child = tokio::process::Command::new(command)
+        // P0-3: 清除敏感环境变量，防止 LLM_API_KEY 等凭据泄露给子进程
+        let mut cmd = tokio::process::Command::new(command);
+        crate::filter_sensitive_env(&mut cmd);
+        let mut child = cmd
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -482,12 +496,32 @@ impl McpClientManager {
         Ok(())
     }
 
-    /// 通过 HTTP 连接到 MCP 服务器
-    ///
-    /// 【领域含义】通过 HTTP POST 请求与远程 MCP 服务器建立连接。
-    /// 服务器必须接受 JSON-RPC POST 请求并返回 JSON-RPC 响应。
-    /// 【核心职责】创建 HTTP 客户端 → 执行 initialize 握手 → 发送 initialized 通知 → 发现工具。
+    /// P1: 通过 HTTP 连接到 MCP 服务器 —— 强制 HTTPS（明文 HTTP 仅在开发环境允许）
     pub async fn connect_http(&mut self, name: &str, url: &str) -> McpClientResult<()> {
+        // P1: 拒绝非 HTTPS MCP 连接（防止凭据通过明文传输和 MITM）
+        let allow_http = std::env::var("CODE_AGENT_ALLOW_MCP_HTTP")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        if !url.starts_with("https://") {
+            if allow_http {
+                tracing::warn!(
+                    mcp_name = %name,
+                    url = %url,
+                    "MCP HTTP connection using plaintext HTTP (CODE_AGENT_ALLOW_MCP_HTTP=true)"
+                );
+            } else {
+                return Err(McpClientError::Connection {
+                    server: name.to_string(),
+                    reason: format!(
+                        "MCP HTTP connections require HTTPS. Set CODE_AGENT_ALLOW_MCP_HTTP=true only for local development. URL: {}",
+                        url
+                    ),
+                });
+            }
+        }
+
+        // reqwest::Client::new() enables TLS verification with system CA store by default.
         let client = reqwest::Client::new();
         let transport = McpTransport::Http {
             base_url: url.to_string(),
@@ -697,6 +731,8 @@ async fn fetch_tools(
     handle: &mut McpClientHandle,
     server: &str,
 ) -> McpClientResult<Vec<McpTool>> {
+    // M2: 限制单 MCP 服务器工具数量，防止恶意服务器通过大量工具导致 agent DoS
+    const MAX_TOOLS_PER_SERVER: usize = 100;
     let result = handle.rpc(server, "tools/list", None).await?;
 
     let list: ToolsListResult =
@@ -704,6 +740,17 @@ async fn fetch_tools(
             server: server.to_string(),
             message: format!("invalid tools/list response: {}", e),
         })?;
+
+    if list.tools.len() > MAX_TOOLS_PER_SERVER {
+        return Err(McpClientError::Protocol {
+            server: server.to_string(),
+            message: format!(
+                "server returned {} tools, exceeding the maximum of {}",
+                list.tools.len(),
+                MAX_TOOLS_PER_SERVER
+            ),
+        });
+    }
 
     Ok(list.tools)
 }
@@ -886,6 +933,8 @@ mod tests {
 
     #[tokio::test]
     async fn connect_http_and_list_tools() {
+        // P1: 测试 mock HTTP server 使用明文 http://，需显式允许
+        std::env::set_var("CODE_AGENT_ALLOW_MCP_HTTP", "true");
         let (url, shutdown) = start_mock_http_server().await;
 
         let mut manager = McpClientManager::new();
@@ -918,6 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_returns_correct_result() {
+        std::env::set_var("CODE_AGENT_ALLOW_MCP_HTTP", "true");
         let (url, shutdown) = start_mock_http_server().await;
 
         let mut manager = McpClientManager::new();
@@ -949,6 +999,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_nonexistent_tool_returns_error() {
+        std::env::set_var("CODE_AGENT_ALLOW_MCP_HTTP", "true");
         let (url, shutdown) = start_mock_http_server().await;
         let mut manager = McpClientManager::new();
         manager
@@ -982,6 +1033,7 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_removes_server() {
+        std::env::set_var("CODE_AGENT_ALLOW_MCP_HTTP", "true");
         let (url, shutdown) = start_mock_http_server().await;
         let mut manager = McpClientManager::new();
         manager
@@ -998,6 +1050,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_clears_tool_cache() {
+        std::env::set_var("CODE_AGENT_ALLOW_MCP_HTTP", "true");
         let (url, shutdown) = start_mock_http_server().await;
         let mut manager = McpClientManager::new();
         manager
@@ -1020,6 +1073,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_tools_merges_across_servers() {
+        std::env::set_var("CODE_AGENT_ALLOW_MCP_HTTP", "true");
         let (url1, shutdown1) = start_mock_http_server().await;
         let (url2, shutdown2) = start_mock_http_server().await;
 
@@ -1048,6 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_calls_to_different_servers() {
+        std::env::set_var("CODE_AGENT_ALLOW_MCP_HTTP", "true");
         let (url1, shutdown1) = start_mock_http_server().await;
         let (url2, shutdown2) = start_mock_http_server().await;
 

@@ -232,6 +232,7 @@ async fn handle_create_thread(
         tool_registry: tr,
         external_cancel: None,
         max_context_tokens: None,
+        temperature: None,
     };
 
     let session = Session::new(config.clone()).await;
@@ -253,7 +254,7 @@ async fn handle_create_thread(
 
     // Register the thread
     let mut tm = thread_manager.lock().unwrap();
-    match tm.create_thread(thread_id.clone(), session) {
+    match tm.create_thread(thread_id.clone(), session, String::new()) {
         Ok(()) => {
             info!(thread_id = %thread_id, "Thread created");
             JsonRpcResponse::success(
@@ -266,10 +267,8 @@ async fn handle_create_thread(
         }
         Err(e) => {
             // Clean up config on failure
-            {
-                let mut configs = thread_configs.lock().unwrap();
-                configs.remove(&thread_id);
-            }
+            let mut configs = thread_configs.lock().unwrap();
+            configs.remove(&thread_id);
             let code = if e.contains("already exists") {
                 error_codes::THREAD_ALREADY_EXISTS
             } else if e.contains("max concurrent") {
@@ -347,7 +346,7 @@ async fn handle_submit_turn(
 
         // Re-insert the session into the thread manager
         let mut tm = tm_clone.lock().unwrap();
-        if let Err(e) = tm.create_thread(tid.clone(), session) {
+        if let Err(e) = tm.create_thread(tid.clone(), session, String::new()) {
             error!(thread_id = %tid, error = %e, "Failed to re-insert session after turn");
         }
     });
@@ -506,13 +505,14 @@ async fn handle_fork_thread(
         tool_registry: tr,
         external_cancel: None,
         max_context_tokens: source_config.max_context_tokens,
+        temperature: None,
     };
 
     let session = Session::new(config).await;
 
     // Register the forked thread
     let mut tm = thread_manager.lock().unwrap();
-    match tm.create_thread(new_id.clone(), session) {
+    match tm.create_thread(new_id.clone(), session, String::new()) {
         Ok(()) => {
             // Store fork config
             let mut configs = thread_configs.lock().unwrap();

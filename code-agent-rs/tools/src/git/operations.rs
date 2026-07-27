@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use git2::{BranchType, DiffOptions, Signature, Sort};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::safety::{check_safety, OperationCategory};
 use super::{FileStatus, GitClient, GitError, GitResult, StatusInfo};
@@ -353,26 +353,39 @@ impl GitClient {
 
     /// 从 Git 配置构建作者/提交者签名
     ///
-    /// 【领域含义】从 Git 配置或环境变量中读取作者信息，构建签名对象。
-    /// 【核心职责】优先使用 `repo.signature()` → 回退到环境变量 `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` → 使用默认值。
+    /// 【领域含义】解析提交者的身份信息，构建 libgit2 签名对象。
+    /// 【核心职责】三级回退：仓库配置 → 环境变量覆盖（带警告）→ 拒绝提交。
+    ///
+    /// # 安全（CWE-290 防护）
+    ///
+    /// 不再接受硬编码身份。提交者身份必须来自以下之一：
+    /// 1. 仓库级别的 `user.name` / `user.email`（`repo.signature()`）
+    /// 2. 环境变量 `CODE_AGENT_GIT_AUTHOR_NAME` / `CODE_AGENT_GIT_AUTHOR_EMAIL`
+    ///    （记录警告，因为环境变量身份可被父进程注入）
+    /// 3. 以上均未配置 → `GitError::IdentityNotConfigured`
     fn build_signature(&self) -> GitResult<Signature<'_>> {
-        // Try to read from the repo config, fall back to env vars.
+        // 第 1 层：仓库配置（首选来源）
         if let Ok(sig) = self.repo.signature() {
             return Ok(sig);
         }
 
-        // Fallback: use environment or hard-coded default.
-        let name = std::env::var("GIT_AUTHOR_NAME")
-            .or_else(|_| std::env::var("GIT_COMMITTER_NAME"))
-            .unwrap_or_else(|_| "code-agent".to_string());
+        // 第 2 层：环境变量覆盖（带审计警告）
+        let env_name = std::env::var("CODE_AGENT_GIT_AUTHOR_NAME").ok();
+        let env_email = std::env::var("CODE_AGENT_GIT_AUTHOR_EMAIL").ok();
 
-        let email = std::env::var("GIT_AUTHOR_EMAIL")
-            .or_else(|_| std::env::var("GIT_COMMITTER_EMAIL"))
-            .unwrap_or_else(|_| "agent@code-agent.local".to_string());
+        if let (Some(name), Some(email)) = (env_name, env_email) {
+            warn!(
+                name = %name,
+                email = %email,
+                "Git identity resolved from CODE_AGENT_GIT_AUTHOR_NAME / CODE_AGENT_GIT_AUTHOR_EMAIL env vars — this bypasses repo config"
+            );
+            return Signature::now(&name, &email).map_err(|e| {
+                GitError::OperationFailed(format!("Failed to create signature from env vars: {}", e))
+            });
+        }
 
-        Signature::now(&name, &email).map_err(|e| {
-            GitError::OperationFailed(format!("Failed to create signature: {}", e))
-        })
+        // 第 3 层：未配置身份 — 拒绝以防止 CWE-290 身份伪造
+        Err(GitError::IdentityNotConfigured)
     }
 }
 
