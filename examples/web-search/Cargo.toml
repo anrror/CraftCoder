@@ -1,0 +1,16 @@
+[package]
+name = "example-web-search"
+version = "0.1.0"
+edition = "2021"
+description = "Example CraftCoder custom tool: web search via DuckDuckGo Instant Answer API"
+license = "MIT"
+
+[dependencies]
+code-agent-core = { path = "../../code-agent-rs/core" }
+code-agent-protocol = { path = "../../code-agent-rs/protocol" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+urlencoding = "1"

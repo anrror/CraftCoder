@@ -1,0 +1,23 @@
+[package]
+name = "code-agent-eval"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["process", "sync", "time", "rt-multi-thread", "fs"] }
+tracing = "0.1"
+tempfile = "3"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json"], optional = true }
+sha2 = "0.10"
+
+[features]
+default = ["remote-datasets"]
+remote-datasets = ["reqwest"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros"] }
+tracing-subscriber = "0.3"

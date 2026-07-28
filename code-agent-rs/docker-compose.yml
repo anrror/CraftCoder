@@ -1,0 +1,79 @@
+# ============================================================
+# Code Agent (CraftCoder) — Docker Compose
+# ============================================================
+# 用法:
+#   docker compose up -d              # 启动 web 服务
+#   docker compose up -d --build      # 修改代码后重建
+#   docker compose logs -f            # 查看日志
+#   docker compose down               # 停止
+#
+# 依赖: .env 文件（见 .env.example）或系统环境变量
+# ============================================================
+
+services:
+  # ── Web API 服务 ──────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: craftcoder-web:latest
+    container_name: craftcoder-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      # LLM 模型连接
+      - LLM_API_KEY=${LLM_API_KEY:?LLM_API_KEY is required}
+      - LLM_API_BASE_URL=${LLM_API_BASE_URL:-https://api.openai.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-120}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-65536}
+      # Web 安全（C7/C15: 与 LLM API key 分离，推荐独立 key）
+      - WEB_API_KEY=${WEB_API_KEY:-}
+      # 日志
+      - RUST_LOG=${RUST_LOG:-info}
+      # CORS（生产环境不开启 --allow-all-origins，已由 docker 网络隔离）
+    volumes:
+      # SQLite 持久化（会话历史、用户数据）
+      - craftcoder-data:/home/codeagent/.local/share/code-agent
+      # 可选：挂载工作目录（挂载到 /workspace）
+      - ${WORK_DIR:-./workspace}:/workspace:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - craftcoder-net
+    # 以非 root 用户运行（Dockerfile 创建的 codeagent 用户）
+    user: "1001:1001"
+
+  # ── (可选) Nginx 反向代理 ──────────────────────────────
+  # 生产环境推荐前置反代：TLS、速率限制、日志
+  # 取消注释以下块以启用，并配置 nginx/ 目录下的配置
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: craftcoder-nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "${NGINX_PORT:-443}:443"
+  #     - "${NGINX_HTTP_PORT:-80}:80"
+  #   volumes:
+  #     - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./nginx/ssl:/etc/nginx/ssl:ro
+  #     - ./nginx/www:/var/www/html:ro
+  #   depends_on:
+  #     web:
+  #       condition: service_healthy
+  #   networks:
+  #     - craftcoder-net
+
+volumes:
+  craftcoder-data:
+    driver: local
+
+networks:
+  craftcoder-net:
+    driver: bridge

@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code-agent-rs
+      - run: cargo check --workspace --manifest-path code-agent-rs/Cargo.toml
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code-agent-rs
+      - run: cargo clippy --workspace --manifest-path code-agent-rs/Cargo.toml -- -D warnings
+
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - run: cargo fmt --all --manifest-path code-agent-rs/Cargo.toml -- --check
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code-agent-rs
+      - run: cargo test --workspace --manifest-path code-agent-rs/Cargo.toml
+
+  msrv:
+    name: MSRV check (1.80)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.80"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code-agent-rs
+      - run: cargo check --workspace --manifest-path code-agent-rs/Cargo.toml
+
+  ui:
+    name: React UI (lint + test + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: code-agent-rs/code-agent-web/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: code-agent-rs/code-agent-web/ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

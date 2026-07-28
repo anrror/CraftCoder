@@ -1,0 +1,231 @@
+name: Continuous Evaluation
+
+on:
+  pull_request:
+    paths:
+      - 'code-agent-rs/core/**'
+      - 'code-agent-rs/codex/**'
+      - 'code-agent-rs/tools/**'
+      - 'code-agent-rs/eval/**'
+      - 'code-agent-rs/eval-runner/**'
+  push:
+    branches: [master]
+    paths:
+      - 'code-agent-rs/core/**'
+      - 'code-agent-rs/codex/**'
+      - 'code-agent-rs/tools/**'
+      - 'code-agent-rs/eval/**'
+      - 'code-agent-rs/eval-runner/**'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  evaluate:
+    name: Benchmark Evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # ------------------------------------------------------------------
+      # Setup
+      # ------------------------------------------------------------------
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code-agent-rs
+          shared-key: eval
+
+      # ------------------------------------------------------------------
+      # Build eval-runner binary
+      # ------------------------------------------------------------------
+      - name: Build eval-runner
+        run: cargo build --release -p eval-runner --manifest-path code-agent-rs/Cargo.toml
+
+      # ------------------------------------------------------------------
+      # Run benchmarks (continue on error — Python may not be available)
+      # ------------------------------------------------------------------
+      - name: Run HumanEval Lite (50 tasks)
+        continue-on-error: true
+        run: |
+          cargo run --release -p eval-runner --manifest-path code-agent-rs/Cargo.toml -- \
+            run humaneval \
+            --dataset data/HumanEval.jsonl \
+            --tasks 50 \
+            --output .omo/eval-results/humaneval.json \
+            --python-script code-agent-eval-py/code_agent_eval/cli.py
+
+      - name: Run SWE-bench-Lite (50 tasks)
+        continue-on-error: true
+        run: |
+          cargo run --release -p eval-runner --manifest-path code-agent-rs/Cargo.toml -- \
+            run swe-bench-live \
+            --cache-dir data/swe-bench \
+            --split lite \
+            --tasks 50 \
+            --output .omo/eval-results/swe-bench.json \
+            --python-script code-agent-eval-py/code_agent_eval/cli.py
+
+      # ------------------------------------------------------------------
+      # Merge results into a combined JSON for comparison
+      # ------------------------------------------------------------------
+      - name: Merge benchmark results
+        run: |
+          mkdir -p .omo/eval-results
+          # Create a combined results file (or use individual ones)
+          # For now, generate a summary from the individual results
+          echo '{"benchmark": "combined", "note": "See individual result files for details."}' > .omo/eval-results/current-summary.json
+
+      # ------------------------------------------------------------------
+      # Download baseline results from main branch
+      # ------------------------------------------------------------------
+      - name: Download baseline (main branch)
+        id: download_baseline
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: eval.yml
+          workflow_conclusion: success
+          branch: main
+          name: eval-results
+          path: .omo/eval-results/baseline
+          if_no_artifact_found: warn
+
+      # ------------------------------------------------------------------
+      # Compare with baseline and generate report
+      # ------------------------------------------------------------------
+      - name: Compare with baseline (HumanEval)
+        if: steps.download_baseline.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo run --release -p eval-runner --manifest-path code-agent-rs/Cargo.toml -- \
+            compare \
+            --baseline .omo/eval-results/baseline/humaneval.json \
+            --current .omo/eval-results/humaneval.json \
+            --output eval-report-humaneval.md \
+            --format markdown
+
+      - name: Compare with baseline (SWE-bench)
+        if: steps.download_baseline.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo run --release -p eval-runner --manifest-path code-agent-rs/Cargo.toml -- \
+            compare \
+            --baseline .omo/eval-results/baseline/swe-bench.json \
+            --current .omo/eval-results/swe-bench.json \
+            --output eval-report-swebench.md \
+            --format markdown
+
+      # ------------------------------------------------------------------
+      # Regression detection
+      # ------------------------------------------------------------------
+      - name: Check for regressions (HumanEval)
+        id: regression_he
+        if: steps.download_baseline.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo run --release -p eval-runner --manifest-path code-agent-rs/Cargo.toml -- \
+            check-regression \
+            --baseline .omo/eval-results/baseline/humaneval.json \
+            --current .omo/eval-results/humaneval.json \
+            --threshold 3.0
+
+      - name: Check for regressions (SWE-bench)
+        id: regression_swe
+        if: steps.download_baseline.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo run --release -p eval-runner --manifest-path code-agent-rs/Cargo.toml -- \
+            check-regression \
+            --baseline .omo/eval-results/baseline/swe-bench.json \
+            --current .omo/eval-results/swe-bench.json \
+            --threshold 3.0
+
+      # ------------------------------------------------------------------
+      # Post PR comment with evaluation report
+      # ------------------------------------------------------------------
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Build report from available data
+            let body = '## :bar_chart: Continuous Evaluation Results\n\n';
+
+            // HumanEval report
+            if (fs.existsSync('eval-report-humaneval.md')) {
+              body += fs.readFileSync('eval-report-humaneval.md', 'utf8');
+            } else if (fs.existsSync('.omo/eval-results/humaneval.json')) {
+              const he = JSON.parse(fs.readFileSync('.omo/eval-results/humaneval.json', 'utf8'));
+              body += `### HumanEval (${he.total_tasks} tasks)\n\n`;
+              body += `| Metric | Value |\n|--------|-------|\n`;
+              body += `| Passed | ${he.passed} / ${he.total_tasks} |\n`;
+              body += `| Failed | ${he.failed} |\n`;
+              body += `| Errored | ${he.errored} |\n`;
+              body += `| pass@1 | ${(he.pass_at_1 * 100).toFixed(1)}% |\n`;
+              body += `| Resolve Rate | ${(he.resolve_rate * 100).toFixed(1)}% |\n\n`;
+            }
+
+            // SWE-bench report
+            if (fs.existsSync('eval-report-swebench.md')) {
+              body += fs.readFileSync('eval-report-swebench.md', 'utf8');
+            } else if (fs.existsSync('.omo/eval-results/swe-bench.json')) {
+              const swe = JSON.parse(fs.readFileSync('.omo/eval-results/swe-bench.json', 'utf8'));
+              body += `### SWE-bench-Lite (${swe.total_tasks} tasks)\n\n`;
+              body += `| Metric | Value |\n|--------|-------|\n`;
+              body += `| Passed | ${swe.passed} / ${swe.total_tasks} |\n`;
+              body += `| Failed | ${swe.failed} |\n`;
+              body += `| Errored | ${swe.errored} |\n`;
+              body += `| pass@1 | ${(swe.pass_at_1 * 100).toFixed(1)}% |\n`;
+              body += `| Resolve Rate | ${(swe.resolve_rate * 100).toFixed(1)}% |\n\n`;
+            }
+
+            // Baseline comparison summary
+            body += '### :mag: Baseline Comparison\n\n';
+            if (fs.existsSync('eval-report-humaneval.md')) {
+              body += '- :white_check_mark: HumanEval comparison generated\n';
+            }
+            if (fs.existsSync('eval-report-swebench.md')) {
+              body += '- :white_check_mark: SWE-bench comparison generated\n';
+            }
+            if (!fs.existsSync('eval-report-humaneval.md') && !fs.existsSync('eval-report-swebench.md')) {
+              body += '- :information_source: No baseline data available for comparison (first run on main?)\n';
+            }
+
+            body += '\n---\n*Generated by [Continuous Evaluation](.github/workflows/eval.yml)*';
+
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: body,
+            });
+
+      # ------------------------------------------------------------------
+      # Store baseline results (main branch only)
+      # ------------------------------------------------------------------
+      - name: Upload baseline artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: |
+            .omo/eval-results/humaneval.json
+            .omo/eval-results/swe-bench.json
+          retention-days: 90
+
+      # ------------------------------------------------------------------
+      # Fail workflow if regressions detected
+      # ------------------------------------------------------------------
+      - name: Report regression status
+        if: steps.regression_he.outcome == 'failure' || steps.regression_swe.outcome == 'failure'
+        run: |
+          echo "::error::Performance regressions detected! See PR comment for details."
+          exit 1

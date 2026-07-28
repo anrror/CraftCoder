@@ -1,0 +1,30 @@
+# Strict lint configuration for AI Coding Agent
+# See https://doc.rust-lang.org/clippy/ for all available options
+
+msrv = "1.80"
+
+# Discourage unwrap/expect in production code
+# Note: unwrap()/expect() are methods, not macros. Use clippy lints instead.
+# The `unwrap_used` and `expect_used` lints are enabled in the workspace Cargo.toml.
+# disallowed-macros entries removed because "unwra*" and "expect" are not valid macro names.
+
+# Maximum cognitive complexity before clippy warns
+cognitive-complexity-threshold = 25
+
+# Disallow certain patterns
+disallowed-methods = [
+  "std::mem::forget",
+]
+
+# Enforce documentation on public items
+missing-docs-in-crate-items = true
+
+# Type complexity limits
+too-many-arguments-threshold = 5
+too-many-lines-threshold = 250
+# too-many-fields-threshold = 10  # removed - not a valid clippy option
+
+# Allow certain lints for test code
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-unwrap-in-tests = true
